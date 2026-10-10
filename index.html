@@ -1,0 +1,830 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Loup — banc d'ambiance v0</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#000;font-family:system-ui,-apple-system,Segoe UI,sans-serif;color:#f6ead6}
+  canvas{display:block;width:100vw;height:100vh;touch-action:none}
+  #ui{position:fixed;left:12px;top:12px;background:rgba(30,18,10,.45);backdrop-filter:blur(6px);padding:10px 12px;border-radius:10px;font-size:13px;line-height:1.4;max-width:300px;user-select:none}
+  #ui h1{font-size:14px;margin:0 0 6px;font-weight:600;letter-spacing:.02em}
+  #ui button{background:rgba(255,230,190,.12);color:#f6ead6;border:1px solid rgba(255,220,170,.35);border-radius:6px;padding:4px 7px;margin:2px 2px 2px 0;font-size:12px;cursor:pointer}
+  #ui button.on{background:rgba(255,190,110,.45);border-color:#ffd9a0}
+  #ui input{width:100%}
+  #desc{opacity:.85;font-size:12px;margin:4px 0}
+  #stats{opacity:.7;font-size:11px}
+  #help{position:fixed;right:12px;bottom:12px;background:rgba(30,18,10,.4);padding:8px 10px;border-radius:8px;font-size:11px;line-height:1.5;opacity:.85;max-width:260px}
+  #enter{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;background:radial-gradient(ellipse at center,rgba(40,20,5,.35),rgba(0,0,0,.75));cursor:pointer;text-align:center;z-index:5}
+  #enter b{font-size:22px;font-weight:500;letter-spacing:.04em}
+  #enter span{opacity:.75;font-size:13px;margin-top:8px}
+  .hidden{display:none!important}
+  #joy{position:fixed;width:110px;height:110px;border-radius:50%;border:2px solid rgba(255,230,190,.35);display:none;pointer-events:none}
+</style>
+<script>
+  window.__errs=[];
+  window.addEventListener('error',e=>window.__errs.push(String(e.message||e)));
+  window.addEventListener('unhandledrejection',e=>window.__errs.push('rejection: '+String(e.reason)));
+  const _ce=console.error;console.error=function(...a){window.__errs.push(a.map(String).join(' '));_ce.apply(console,a)};
+</script>
+<script type="importmap">
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"}}
+</script>
+</head>
+<body>
+<div id="ui">
+  <h1>🐺 Banc d'ambiance — moteur v0</h1>
+  <div>
+    <button data-v="A">1 · A microvoxel</button><button data-v="B">2 · B hybride</button><button data-v="C">3 · C quasi réaliste</button>
+  </div>
+  <div id="desc"></div>
+  <label>Heure <span id="hour"></span><input id="tod" type="range" min="0" max="1" step="0.001"></label>
+  <div id="stats"></div>
+</div>
+<div id="help">
+  ZQSD / WASD / flèches : marcher · Maj : courir<br>
+  Souris (glisser) : tourner la caméra · molette : distance<br>
+  1 / 2 / 3 : variante · T / R : avancer / reculer l'heure<br>
+  M : son · H : masquer l'interface<br>
+  Mobile : pouce gauche = marcher, droite = caméra
+</div>
+<div id="enter"><b>Entrer dans la plaine</b><span>clic ou toucher (active le son)</span></div>
+<div id="joy"></div>
+<script type="module">
+import * as THREE from 'three';
+import { Sky } from 'three/addons/objects/Sky.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+
+const QS = new URLSearchParams(location.search);
+const MOBILE = /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent) || QS.get('q') === 'low';
+const SHOT = QS.has('shot');
+const HAS_WEBGPU = !!navigator.gpu;
+
+// ---------- bruit & hasard déterministes ----------
+function hash2(x, y) { let h = (Math.imul(x | 0, 374761393) + Math.imul(y | 0, 668265263)) | 0; h = Math.imul(h ^ (h >>> 13), 1274126177); h ^= h >>> 16; return (h >>> 0) / 4294967296; }
+function hash3(x, y, z) { return hash2((x | 0) + Math.imul(z | 0, 1013), (y | 0) - Math.imul(z | 0, 7919)); }
+const sm = t => t * t * (3 - 2 * t);
+function vnoise(x, y) { const xi = Math.floor(x), yi = Math.floor(y), u = sm(x - xi), v = sm(y - yi); const a = hash2(xi, yi), b = hash2(xi + 1, yi), c = hash2(xi, yi + 1), d = hash2(xi + 1, yi + 1); return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v; }
+function vnoise3(x, y, z) { const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z), u = sm(x - xi), v = sm(y - yi), w = sm(z - zi); const L = (a, b, t) => a + (b - a) * t; const f = (dz) => L(L(hash3(xi, yi, zi + dz), hash3(xi + 1, yi, zi + dz), u), L(hash3(xi, yi + 1, zi + dz), hash3(xi + 1, yi + 1, zi + dz), u), v); return L(f(0), f(1), w); }
+function fbm(x, y, o = 4) { let s = 0, a = 0.5, f = 1; for (let i = 0; i < o; i++) { s += a * vnoise(x * f, y * f); f *= 2.03; a *= 0.5; } return s; }
+function rng(seed) { return () => { seed |= 0; seed = (seed + 0x6D2B79F5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+const mix = (a, b, t) => a + (b - a) * t;
+const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
+const sstep = (a, b, x) => { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
+
+// ---------- le monde ----------
+const HALF = 200, TEXN = 512, CELL = 2 * HALF / TEXN;
+const POND = { x: -26, z: -30, r: 9 };
+const RUIN = { x: 30, z: -62 };
+function rawH(x, z) {
+  let h = (fbm(x * 0.011 + 3, z * 0.011 - 7) - 0.45) * 8;
+  const side = Math.max(0, Math.abs(x) - 60); h += side * side * 0.0018 * (0.6 + fbm(x * 0.02, z * 0.02));
+  const back = Math.max(0, z - 70); h += back * back * 0.0012;
+  const north = Math.max(0, -z - 85); h += Math.min(north * 0.06, 4) + (fbm(x * 0.05, z * 0.05) - 0.5) * 3 * Math.min(1, north / 20);
+  h += (fbm(x * 0.09 + 11, z * 0.09) - 0.5) * 0.7;
+  return h;
+}
+const WATER_Y = rawH(POND.x, POND.z) - 0.35;
+const RUIN_Y = rawH(RUIN.x, RUIN.z);
+function worldH(x, z) {
+  let h = rawH(x, z);
+  h = mix(h, RUIN_Y, sstep(16, 9, Math.hypot(x - RUIN.x, z - RUIN.z)));
+  const dp = Math.hypot(x - POND.x, z - POND.z);
+  h = mix(h, Math.min(h, WATER_Y - 1.4), sstep(POND.r + 3, POND.r - 3, dp));
+  return h;
+}
+function density(x, z) {
+  let d = 0.5 + 0.55 * fbm(x * 0.035 + 50, z * 0.035);
+  const dp = Math.hypot(x - POND.x, z - POND.z); d *= sstep(POND.r + 0.3, POND.r + 2.5, dp);
+  d *= mix(1, 0.25, sstep(-95, -115, z));
+  d *= mix(1, 0.15, sstep(11, 7, Math.hypot(x - RUIN.x, z - RUIN.z)));
+  return clamp(d, 0, 1);
+}
+const HDATA = new Float32Array(TEXN * TEXN * 2);
+for (let j = 0; j < TEXN; j++) for (let i = 0; i < TEXN; i++) {
+  const x = -HALF + (i + 0.5) * CELL, z = -HALF + (j + 0.5) * CELL, k = (j * TEXN + i) * 2;
+  HDATA[k] = worldH(x, z); HDATA[k + 1] = density(x, z);
+}
+const heightTex = new THREE.DataTexture(HDATA, TEXN, TEXN, THREE.RGFormat, THREE.FloatType);
+heightTex.minFilter = heightTex.magFilter = THREE.NearestFilter; heightTex.needsUpdate = true;
+function sampleH(x, z) { // bilinéaire identique au GLSL
+  const u = (x + HALF) / CELL - 0.5, v = (z + HALF) / CELL - 0.5, i = Math.floor(u), j = Math.floor(v), fu = u - i, fv = v - j;
+  const g = (a, b) => HDATA[(clamp(b, 0, TEXN - 1) * TEXN + clamp(a, 0, TEXN - 1)) * 2];
+  return mix(mix(g(i, j), g(i + 1, j), fu), mix(g(i, j + 1), g(i + 1, j + 1), fu), fv);
+}
+const GLSL_H = `
+uniform sampler2D uHeight;
+vec2 hsample(vec2 p){ vec2 u=(p+${HALF.toFixed(1)})/${CELL.toFixed(6)}-0.5; vec2 i=floor(u); vec2 f=u-i;
+ ivec2 a=ivec2(clamp(i,0.,${TEXN - 1}.)), b=ivec2(clamp(i+1.,0.,${TEXN - 1}.));
+ vec2 v00=texelFetch(uHeight,ivec2(a.x,a.y),0).rg, v10=texelFetch(uHeight,ivec2(b.x,a.y),0).rg, v01=texelFetch(uHeight,ivec2(a.x,b.y),0).rg, v11=texelFetch(uHeight,ivec2(b.x,b.y),0).rg;
+ return mix(mix(v00,v10,f.x),mix(v01,v11,f.x),f.y); }`;
+
+// ---------- variantes ----------
+const VARIANTS = {
+  A: { name: 'A · tout microvoxel', vox: 0.5, R: 80, grass: 'stalk', trees: 'vox', rocks: 'vox', wolf: 'vox', hemi: 1.35, desc: 'Terrain, rochers, arbres, ruines et loup en voxels fins. Herbes en tiges cubiques. Ombre douce, AO par sommet, brume.' },
+  B: { name: 'B · hybride', vox: 1.0, R: 120, grass: 'blade', trees: 'card', rocks: 'vox', wolf: 'smooth', hemi: 1.1, desc: 'Relief, rochers et ruines en voxels ; herbes, feuillage, loup, lumière et ciel réalistes par-dessus.' },
+  C: { name: 'C · quasi réaliste', vox: 0, R: 0, grass: 'blade', trees: 'card', rocks: 'smooth', wolf: 'smooth', hemi: 1.0, desc: 'Tout lisse ; seules les ruines restent en voxels (la touche discrète).' },
+};
+let V = VARIANTS[(QS.get('v') || 'B').toUpperCase()] ? (QS.get('v') || 'B').toUpperCase() : 'B';
+const qv = (h, s) => Math.floor(h / s + 0.5) * s;
+function groundAt(x, z) {
+  const c = VARIANTS[V]; const h = sampleH(x, z);
+  if (c.vox && Math.abs(x) < c.R && Math.abs(z) < c.R) { const cx = (Math.floor(x / c.vox) + 0.5) * c.vox, cz = (Math.floor(z / c.vox) + 0.5) * c.vox; return qv(sampleH(cx, cz), c.vox); }
+  return h;
+}
+
+// ---------- rendu ----------
+const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance', preserveDrawingBuffer: SHOT });
+let PR = SHOT ? 1 : Math.min(devicePixelRatio, MOBILE ? 1.25 : 1.5);
+renderer.setPixelRatio(PR); renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = !MOBILE; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.prepend(renderer.domElement);
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.3, 5000);
+const U = { time: { value: 0 } };
+scene.fog = new THREE.FogExp2(0xe0a070, 0.0062);
+
+const sky = new Sky(); sky.scale.setScalar(4500); scene.add(sky);
+const su = sky.material.uniforms; su.turbidity.value = 7; su.rayleigh.value = 2.4; su.mieCoefficient.value = 0.007; su.mieDirectionalG.value = 0.87;
+const sun = new THREE.DirectionalLight(0xffb070, 3); sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048); Object.assign(sun.shadow.camera, { left: -45, right: 45, top: 45, bottom: -45, near: 1, far: 260 });
+sun.shadow.bias = -0.0006; sun.shadow.normalBias = 0.04; sun.shadow.radius = 3;
+scene.add(sun, sun.target);
+const hemi = new THREE.HemisphereLight(0x8899cc, 0x5a3a20, 1.2); scene.add(hemi);
+
+// soleil, couleurs : une seule fonction de l'heure
+const SUNH = new THREE.Vector3(0.38, 0, -1).normalize();
+const sunDir = new THREE.Vector3(), sunCol = new THREE.Color(), skyCol = new THREE.Color(), grdCol = new THREE.Color(), fogCol = new THREE.Color(), rayCol = new THREE.Color();
+let tod = QS.has('t') ? +QS.get('t') : 0.6, night = 0, elevDeg = 0;
+const lerpC = (o, a, b, t) => o.setRGB(mix(a[0], b[0], t), mix(a[1], b[1], t), mix(a[2], b[2], t));
+function updateSun() {
+  elevDeg = mix(22, -3, tod); const e = elevDeg * Math.PI / 180;
+  sunDir.copy(SUNH).multiplyScalar(Math.cos(e)).setY(Math.sin(e)).normalize();
+  su.sunPosition.value.copy(sunDir);
+  const hi = clamp(elevDeg / 20, 0, 1);
+  lerpC(sunCol, [1.0, 0.36, 0.1], [1.0, 0.8, 0.58], Math.pow(hi, 0.7));
+  sun.color.copy(sunCol); sun.intensity = 3.4 * sstep(-2.5, 3, elevDeg);
+  lerpC(skyCol, [0.22, 0.24, 0.42], [0.5, 0.58, 0.78], sstep(-4, 16, elevDeg));
+  lerpC(grdCol, [0.25, 0.14, 0.08], [0.42, 0.3, 0.16], hi);
+  hemi.color.copy(skyCol); hemi.groundColor.copy(grdCol); hemi.intensity = VARIANTS[V].hemi * (0.35 + 0.65 * sstep(-6, 10, elevDeg));
+  lerpC(fogCol, [0.42, 0.26, 0.26], [0.98, 0.6, 0.32], sstep(-3, 7, elevDeg));
+  if (elevDeg > 7) fogCol.lerp(new THREE.Color(0.9, 0.78, 0.62), sstep(7, 22, elevDeg));
+  scene.fog.color.copy(fogCol);
+  night = 1 - sstep(-2, 9, elevDeg);
+  rayCol.copy(sunCol).multiplyScalar(sstep(-2.5, 2, elevDeg) * (1.15 - 0.5 * hi));
+  const hh = 17.6 + tod * 3.2, hm = Math.floor((hh % 1) * 60);
+  document.getElementById('hour').textContent = `${Math.floor(hh)}h${String(hm).padStart(2, '0')}`;
+}
+
+// ---------- matériaux voxels / vent ----------
+function windy(mat, amp = 1) {
+  mat.onBeforeCompile = (sh) => {
+    sh.uniforms.uTime = U.time;
+    sh.vertexShader = 'uniform float uTime;\nattribute float aSway;\n' + sh.vertexShader.replace('#include <begin_vertex>', `#include <begin_vertex>
+      #ifdef USE_INSTANCING
+        vec3 ip = instanceMatrix[3].xyz;
+      #else
+        vec3 ip = vec3(0.);
+      #endif
+      float sw = aSway * ${amp.toFixed(2)} * (0.65 + 0.35*sin(uTime*0.6 + ip.x*0.04)) * max(position.y,0.) * 0.012;
+      transformed.x += sw * sin(uTime*1.6 + ip.x*0.3 + position.y*0.35 + position.z*0.5);
+      transformed.z += sw * cos(uTime*1.25 + ip.z*0.27 + position.x*0.5);`);
+  };
+  return mat;
+}
+const voxMat = windy(new THREE.MeshLambertMaterial({ vertexColors: true }));
+
+// Voxeliseur : occupation -> faces exposées, AO par sommet (le cœur du look « John Lin »)
+const FACES = [[[1, 0, 0], [0, 1, 0], [0, 0, 1]], [[-1, 0, 0], [0, 0, 1], [0, 1, 0]], [[0, 1, 0], [0, 0, 1], [1, 0, 0]], [[0, -1, 0], [1, 0, 0], [0, 0, 1]], [[0, 0, 1], [1, 0, 0], [0, 1, 0]], [[0, 0, -1], [0, 1, 0], [1, 0, 0]]];
+const AOV = [0.42, 0.62, 0.82, 1];
+function voxelize({ min, max, s, occ, col, sway }) {
+  const nx = Math.ceil((max[0] - min[0]) / s) + 2, ny = Math.ceil((max[1] - min[1]) / s) + 2, nz = Math.ceil((max[2] - min[2]) / s) + 2;
+  const g = new Uint8Array(nx * ny * nz), id = (i, j, k) => (k * ny + j) * nx + i;
+  const X = i => min[0] + (i - 0.5) * s, Y = j => min[1] + (j - 0.5) * s, Z = k => min[2] + (k - 0.5) * s;
+  for (let k = 1; k < nz - 1; k++) for (let j = 1; j < ny - 1; j++) for (let i = 1; i < nx - 1; i++) if (occ(X(i), Y(j), Z(k))) g[id(i, j, k)] = 1;
+  const at = (i, j, k) => (i < 0 || j < 0 || k < 0 || i >= nx || j >= ny || k >= nz) ? 0 : g[id(i, j, k)];
+  const P = [], N = [], C = [], S = [], I = [];
+  const cs = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
+  for (let k = 1; k < nz - 1; k++) for (let j = 1; j < ny - 1; j++) for (let i = 1; i < nx - 1; i++) {
+    if (!g[id(i, j, k)]) continue;
+    const x = X(i), y = Y(j), z = Z(k);
+    const c = col(x, y, z, !at(i, j + 1, k)), f = 0.86 + 0.28 * hash3(i * 7 + 3, j * 5 + 1, k * 3 + 2);
+    const sw = sway ? sway(x, y, z) : 0;
+    for (const [n, u, v] of FACES) {
+      if (at(i + n[0], j + n[1], k + n[2])) continue;
+      const base = P.length / 3, ao = [];
+      for (const [a, b] of cs) {
+        const s1 = at(i + n[0] + a * u[0], j + n[1] + a * u[1], k + n[2] + a * u[2]);
+        const s2 = at(i + n[0] + b * v[0], j + n[1] + b * v[1], k + n[2] + b * v[2]);
+        const cc = at(i + n[0] + a * u[0] + b * v[0], j + n[1] + a * u[1] + b * v[1], k + n[2] + a * u[2] + b * v[2]);
+        const l = (s1 && s2) ? 0 : 3 - (s1 + s2 + cc); ao.push(l);
+        P.push(x + 0.5 * s * (n[0] + a * u[0] + b * v[0]), y + 0.5 * s * (n[1] + a * u[1] + b * v[1]), z + 0.5 * s * (n[2] + a * u[2] + b * v[2]));
+        N.push(n[0], n[1], n[2]); const m = f * AOV[l]; C.push(c[0] * m, c[1] * m, c[2] * m); S.push(sw);
+      }
+      if (ao[0] + ao[2] < ao[1] + ao[3]) I.push(base + 1, base + 2, base + 3, base + 1, base + 3, base); else I.push(base, base + 1, base + 2, base, base + 2, base + 3);
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(P, 3)); geo.setAttribute('normal', new THREE.Float32BufferAttribute(N, 3));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(C, 3)); geo.setAttribute('aSway', new THREE.Float32BufferAttribute(S, 1));
+  geo.setIndex(P.length / 3 > 65535 ? new THREE.Uint32BufferAttribute(I, 1) : new THREE.Uint16BufferAttribute(I, 1));
+  return geo;
+}
+
+// palette commune
+function groundColor(x, z, h, top) {
+  const n = fbm(x * 0.07, z * 0.07, 3), dp = Math.hypot(x - POND.x, z - POND.z);
+  let c = [mix(0.2, 0.3, n), mix(0.2, 0.25, n), mix(0.06, 0.08, n)];
+  if (z < -95) c = [mix(c[0], 0.1, 0.6), mix(c[1], 0.15, 0.5), mix(c[2], 0.05, 0.5)];
+  if (dp < POND.r + 2.5) { const t = sstep(POND.r + 2.5, POND.r, dp); c = [mix(c[0], 0.36, t), mix(c[1], 0.3, t), mix(c[2], 0.2, t)]; }
+  if (h > 9) { const t = sstep(9, 16, h); c = [mix(c[0], 0.38, t), mix(c[1], 0.34, t), mix(c[2], 0.3, t)]; }
+  if (!top) c = [0.3, 0.2, 0.12];
+  return c;
+}
+
+// ---------- terrains ----------
+const terrainSmooth = (() => {
+  const seg = MOBILE ? 180 : 300, geo = new THREE.PlaneGeometry(2 * HALF, 2 * HALF, seg, seg); geo.rotateX(-Math.PI / 2);
+  const p = geo.attributes.position, col = [];
+  for (let i = 0; i < p.count; i++) { const x = p.getX(i), z = p.getZ(i), h = sampleH(x, z); p.setY(i, h); col.push(...groundColor(x, z, h, true)); }
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3)); geo.computeVertexNormals();
+  const mat = new THREE.MeshLambertMaterial({ vertexColors: true });
+  mat.userData.hole = { value: 0 };
+  mat.onBeforeCompile = (sh) => {
+    sh.uniforms.uHole = mat.userData.hole;
+    sh.vertexShader = 'varying vec3 vWp;\n' + sh.vertexShader.replace('#include <worldpos_vertex>', '#include <worldpos_vertex>\nvWp = (modelMatrix*vec4(transformed,1.)).xyz;');
+    sh.fragmentShader = 'uniform float uHole;\nvarying vec3 vWp;\n' + sh.fragmentShader.replace('void main() {', 'void main() {\nif(uHole>0. && abs(vWp.x)<uHole && abs(vWp.z)<uHole) discard;');
+  };
+  const m = new THREE.Mesh(geo, mat); m.receiveShadow = true; scene.add(m); return m;
+})();
+const voxTerrains = {};
+function buildVoxTerrain(s, R) {
+  const n = Math.round(2 * R / s), T = new Float32Array(n * n), cx = i => -R + (i + 0.5) * s;
+  for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) T[j * n + i] = qv(sampleH(cx(i), cx(j)), s);
+  const t = (i, j) => (i < 0 || j < 0 || i >= n || j >= n) ? -1e9 : T[j * n + i];
+  const P = [], Nn = [], C = [], I = [];
+  const quad = (a, b, c, d, nrm, cols) => { const o = P.length / 3; P.push(...a, ...b, ...c, ...d); for (let k = 0; k < 4; k++) Nn.push(...nrm); C.push(...cols); I.push(o, o + 1, o + 2, o, o + 2, o + 3); };
+  for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
+    const h = t(i, j), x0 = -R + i * s, z0 = -R + j * s, x1 = x0 + s, z1 = z0 + s, X = x0 + s / 2, Z = z0 + s / 2;
+    const base = groundColor(X, Z, h, true), f = 0.84 + 0.3 * hash2(i * 3 + 17, j * 5 + 9), e = 1e-3;
+    const ao = (a, b) => { const s1 = t(i + a, j) > h + e, s2 = t(i, j + b) > h + e, c = t(i + a, j + b) > h + e; return AOV[(s1 && s2) ? 0 : 3 - (s1 + s2 + c)]; };
+    const cc = (m) => [base[0] * f * m, base[1] * f * m, base[2] * f * m];
+    quad([x0, h, z0], [x0, h, z1], [x1, h, z1], [x1, h, z0], [0, 1, 0], [...cc(ao(-1, -1)), ...cc(ao(-1, 1)), ...cc(ao(1, 1)), ...cc(ao(1, -1))]);
+    const side = [0.3 * f, 0.2 * f, 0.12 * f], low = side.map(v => v * 0.55);
+    const sides = [[1, 0, [x1, z1], [x1, z0], [1, 0, 0]], [-1, 0, [x0, z0], [x0, z1], [-1, 0, 0]], [0, 1, [x0, z1], [x1, z1], [0, 0, 1]], [0, -1, [x1, z0], [x0, z0], [0, 0, -1]]];
+    for (const [di, dj, a, b, nrm] of sides) {
+      let hn = t(i + di, j + dj); if (hn < -1e8) hn = h - 3; if (hn >= h) continue;
+      quad([a[0], hn, a[1]], [b[0], hn, b[1]], [b[0], h, b[1]], [a[0], h, a[1]], nrm, [...low, ...low, ...side, ...side]);
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(P, 3)); geo.setAttribute('normal', new THREE.Float32BufferAttribute(Nn, 3));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(C, 3)); geo.setAttribute('aSway', new THREE.Float32BufferAttribute(new Float32Array(P.length / 3), 1));
+  geo.setIndex(new THREE.Uint32BufferAttribute(I, 1));
+  const m = new THREE.Mesh(geo, voxMat); m.receiveShadow = true; m.castShadow = true; scene.add(m); return m;
+}
+
+// ---------- végétation : une description, deux rendus (voxels / cartes de feuilles) ----------
+function treeDesc(type, seed) {
+  const r = rng(seed), segs = [], blobs = [];
+  if (type === 'teak') {
+    const H = 12 + r() * 6, top = [r() * 1.2 - 0.6, H * 0.62, r() * 1.2 - 0.6];
+    segs.push({ a: [0, -0.5, 0], b: top, r0: 0.75, r1: 0.4 });
+    for (let k = 0; k < 6; k++) {
+      const ang = r() * 6.28, d = 2 + r() * 2.6, c = [top[0] + Math.cos(ang) * d, H * (0.72 + r() * 0.25), top[2] + Math.sin(ang) * d];
+      segs.push({ a: top, b: c, r0: 0.32, r1: 0.14 }); blobs.push({ c, r: 2.2 + r() * 1.3 });
+    }
+    blobs.push({ c: [top[0], H * 0.95, top[2]], r: 3 });
+  } else if (type === 'banyan') {
+    const H = 10 + r() * 3;
+    segs.push({ a: [0, -0.5, 0], b: [0, H * 0.55, 0], r0: 1.5, r1: 0.9 });
+    for (let k = 0; k < 9; k++) {
+      const ang = k / 9 * 6.28 + r() * 0.5, d = 3 + r() * 4.5, c = [Math.cos(ang) * d, H * (0.75 + r() * 0.2), Math.sin(ang) * d];
+      segs.push({ a: [0, H * 0.5, 0], b: c, r0: 0.5, r1: 0.2 }); blobs.push({ c, r: 2.4 + r() * 1.4 });
+      if (r() < 0.8) { const rx = c[0] * (0.6 + r() * 0.3), rz = c[2] * (0.6 + r() * 0.3); segs.push({ a: [rx, c[1] - 1, rz], b: [rx, -0.3, rz], r0: 0.13, r1: 0.11, root: 1 }); }
+    }
+    blobs.push({ c: [0, H, 0], r: 3.4 });
+  } else if (type === 'bamboo') {
+    for (let k = 0; k < 11; k++) {
+      const ang = r() * 6.28, d = r() * 1.3, H = 8 + r() * 5, lx = Math.cos(ang) * (d + H * 0.12), lz = Math.sin(ang) * (d + H * 0.12);
+      segs.push({ a: [Math.cos(ang) * d, -0.3, Math.sin(ang) * d], b: [lx, H, lz], r0: 0.16, r1: 0.12, culm: 1 });
+      for (let q = 0; q < 3; q++) { const t = 0.55 + q * 0.17; blobs.push({ c: [mix(Math.cos(ang) * d, lx, t), H * t, mix(Math.sin(ang) * d, lz, t)], r: 1.0 + r() * 0.5, thin: 1 }); }
+    }
+  } else { // bush / fougères
+    for (let k = 0; k < 4; k++) blobs.push({ c: [r() * 2 - 1, 0.6 + r() * 0.6, r() * 2 - 1], r: 1 + r() * 0.7 });
+  }
+  return { type, segs, blobs };
+}
+function segDist(p, a, b) { const ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]], ap = [p[0] - a[0], p[1] - a[1], p[2] - a[2]]; const t = clamp((ap[0] * ab[0] + ap[1] * ab[1] + ap[2] * ab[2]) / (ab[0] ** 2 + ab[1] ** 2 + ab[2] ** 2), 0, 1); return [Math.hypot(ap[0] - ab[0] * t, ap[1] - ab[1] * t, ap[2] - ab[2] * t), t]; }
+function descBounds(d) { const mn = [1e9, 1e9, 1e9], mx = [-1e9, -1e9, -1e9]; const add = (c, r) => { for (let k = 0; k < 3; k++) { mn[k] = Math.min(mn[k], c[k] - r); mx[k] = Math.max(mx[k], c[k] + r); } }; d.segs.forEach(s => { add(s.a, s.r0); add(s.b, s.r0); }); d.blobs.forEach(b => add(b.c, b.r * 1.2)); mn[1] = Math.max(mn[1], -0.6); return [mn, mx]; }
+function treeVox(d) {
+  const [min, max] = descBounds(d), s = d.type === 'bamboo' ? 0.2 : 0.28;
+  const leaf = (x, y, z) => { for (const b of d.blobs) { const dd = Math.hypot(x - b.c[0], (y - b.c[1]) * (b.thin ? 1.8 : 1.15), z - b.c[2]); if (dd < b.r * (0.72 + 0.5 * vnoise3(x * 0.7, y * 0.7, z * 0.7))) return 1; } return 0; };
+  const wood = (x, y, z) => { for (const sg of d.segs) { const [dd, t] = segDist([x, y, z], sg.a, sg.b); if (dd < mix(sg.r0, sg.r1, t) + 0.04) return sg.culm ? 3 : 2; } return 0; };
+  return voxelize({
+    min, max, s,
+    occ: (x, y, z) => wood(x, y, z) || (leaf(x, y, z) && hash3(x * 97, y * 89, z * 83) > 0.12),
+    col: (x, y, z, top) => { const w = wood(x, y, z); if (w === 3) return [0.42, 0.46, 0.16]; if (w === 2) return [0.24, 0.17, 0.11]; const n = vnoise3(x * 0.5, y * 0.5, z * 0.5); return top ? [mix(0.3, 0.46, n), mix(0.36, 0.42, n), 0.1] : [mix(0.08, 0.17, n), mix(0.2, 0.31, n), mix(0.05, 0.08, n)]; },
+    sway: (x, y, z) => wood(x, y, z) ? 0 : 1,
+  });
+}
+let leafTex;
+function makeLeafTex() {
+  const c = document.createElement('canvas'); c.width = c.height = 128; const g = c.getContext('2d'); const r = rng(7);
+  for (let k = 0; k < 16; k++) {
+    const x = 20 + r() * 88, y = 20 + r() * 88, a = r() * 6.28, l = 16 + r() * 18;
+    g.save(); g.translate(x, y); g.rotate(a);
+    const v = 0.75 + r() * 0.5; g.fillStyle = `rgb(${110 * v | 0},${150 * v | 0},${60 * v | 0})`;
+    g.beginPath(); g.ellipse(0, 0, l, l * 0.38, 0, 0, 6.28); g.fill();
+    g.strokeStyle = 'rgba(40,60,20,.6)'; g.lineWidth = 1.2; g.beginPath(); g.moveTo(-l, 0); g.lineTo(l, 0); g.stroke(); g.restore();
+  }
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4; return t;
+}
+function treeCards(d) {
+  leafTex ||= makeLeafTex();
+  const r = rng(d.segs.length * 31 + d.blobs.length * 7), wood = [], leaves = [];
+  for (const sg of d.segs) {
+    const a = new THREE.Vector3(...sg.a), b = new THREE.Vector3(...sg.b), len = a.distanceTo(b);
+    const g = new THREE.CylinderGeometry(sg.r1, sg.r0, len, sg.culm ? 6 : 8, 4); g.translate(0, len / 2, 0);
+    g.applyQuaternion(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), b.clone().sub(a).normalize())); g.translate(a.x, a.y, a.z);
+    const p = g.attributes.position, col = [];
+    for (let i = 0; i < p.count; i++) { const n = vnoise(p.getX(i) * 3 + p.getZ(i) * 3, p.getY(i) * 0.8); col.push(...(sg.culm ? [0.42 * (0.8 + 0.3 * n), 0.46 * (0.8 + 0.3 * n), 0.16] : [0.2 + 0.1 * n, 0.14 + 0.06 * n, 0.09])); }
+    g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3)); g.setAttribute('aSway', new THREE.Float32BufferAttribute(new Float32Array(p.count), 1));
+    wood.push(g);
+  }
+  for (const bl of d.blobs) {
+    const nCards = Math.round(bl.r * bl.r * (bl.thin ? 2.2 : 3.4)), size = bl.thin ? 1.1 : 1.9;
+    for (let k = 0; k < nCards; k++) {
+      const g = new THREE.PlaneGeometry(size, size);
+      g.rotateX(r() * 6.28); g.rotateY(r() * 6.28); g.rotateZ(r() * 6.28);
+      const dir = new THREE.Vector3(r() - 0.5, (r() - 0.5) * 0.8, r() - 0.5).normalize(), rad = bl.r * Math.pow(r(), 0.4) * 0.85;
+      const cpos = new THREE.Vector3(...bl.c).addScaledVector(dir, rad); g.translate(cpos.x, cpos.y, cpos.z);
+      const p = g.attributes.position, nrm = g.attributes.normal, col = [], v = 0.75 + r() * 0.45, top = dir.y > 0.3;
+      for (let i = 0; i < p.count; i++) {
+        const o = new THREE.Vector3(p.getX(i) - bl.c[0], p.getY(i) - bl.c[1], p.getZ(i) - bl.c[2]).normalize(); nrm.setXYZ(i, o.x, o.y, o.z);
+        col.push(...(top ? [0.62 * v, 0.6 * v, 0.28 * v] : [0.42 * v, 0.55 * v, 0.3 * v]));
+      }
+      g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3)); g.setAttribute('aSway', new THREE.Float32BufferAttribute(new Float32Array(p.count).fill(1), 1));
+      leaves.push(g);
+    }
+  }
+  return { wood: wood.length ? mergeGeometries(wood) : null, leaves: leaves.length ? mergeGeometries(leaves) : null };
+}
+const barkMat = windy(new THREE.MeshLambertMaterial({ vertexColors: true }), 0.3);
+const leafMat = windy(new THREE.MeshLambertMaterial({ vertexColors: true, map: null, alphaTest: 0.45, side: THREE.DoubleSide }), 1.2);
+
+// placements (identiques pour les 3 variantes : on compare le rendu, pas le décor)
+const R0 = rng(1234), placements = { teak: [], banyan: [], bamboo: [], bush: [] };
+const far = (x, z) => Math.hypot(x - RUIN.x, z - RUIN.z) > 13 && Math.hypot(x - POND.x, z - POND.z) > POND.r + 3 && Math.hypot(x, z) > 18;
+for (let i = 0; i < (MOBILE ? 110 : 190); i++) {
+  const x = R0() * 370 - 185, z = -98 - Math.pow(R0(), 0.8) * 85; if (!far(x, z)) continue;
+  const t = R0(); placements[t < 0.5 ? 'teak' : t < 0.75 ? 'banyan' : 'bamboo'].push([x, z, R0()]);
+}
+for (let i = 0; i < 9; i++) { const a = R0() * 6.28, d = 45 + R0() * 50, x = Math.cos(a) * d, z = Math.sin(a) * d * 0.7 - 20; if (far(x, z)) placements[R0() < 0.6 ? 'teak' : 'banyan'].push([x, z, R0()]); }
+for (let i = 0; i < 150; i++) { const x = R0() * 370 - 185, z = -88 - R0() * 30; if (far(x, z)) placements.bush.push([x, z, R0()]); }
+for (let i = 0; i < 14; i++) { const a = R0() * 6.28, x = POND.x + Math.cos(a) * (POND.r + 2.5), z = POND.z + Math.sin(a) * (POND.r + 2.5); placements.bush.push([x, z, R0()]); }
+
+const PROTOS = 3, groups = { vox: new THREE.Group(), card: new THREE.Group() }; scene.add(groups.vox, groups.card);
+const dummy = new THREE.Object3D();
+function instance(geo, mat, list, grp, quarter) {
+  if (!geo || !list.length) return;
+  const m = new THREE.InstancedMesh(geo, mat, list.length);
+  list.forEach(([x, z, r], k) => { dummy.position.set(x, sampleH(x, z) - 0.15, z); dummy.rotation.set(0, quarter ? Math.floor(r * 4) * Math.PI / 2 : r * 6.28, 0); dummy.scale.setScalar(0.85 + (r * 7 % 1) * 0.35); dummy.updateMatrix(); m.setMatrixAt(k, dummy.matrix); });
+  m.castShadow = true; m.receiveShadow = true; grp.add(m);
+}
+for (const type of Object.keys(placements)) {
+  const all = placements[type];
+  for (let p = 0; p < PROTOS; p++) {
+    const list = all.filter((_, k) => k % PROTOS === p), d = treeDesc(type, 100 + p * 17 + type.length);
+    instance(treeVox(d), voxMat, list, groups.vox, true);
+    const cards = treeCards(d); leafMat.map = leafTex; instance(cards.wood, barkMat, list, groups.card, false); instance(cards.leaves, leafMat, list, groups.card, false);
+  }
+}
+
+// rochers
+const rockList = []; { const r = rng(99); for (let i = 0; i < 46; i++) { const x = r() * 240 - 120, z = r() * 190 - 120; if (far(x, z) || Math.hypot(x, z) > 11) rockList.push([x, z, r()]); } rockList.push([9, -6, 0.3], [-7, -12, 0.8]); }
+const rocks = { vox: new THREE.Group(), smooth: new THREE.Group() }; scene.add(rocks.vox, rocks.smooth);
+const rockColor = (y, ny, n) => ny > 0.55 && n > 0.45 ? [0.22, 0.28, 0.09] : [mix(0.33, 0.45, n), mix(0.3, 0.4, n), mix(0.26, 0.33, n)];
+for (let p = 0; p < 3; p++) {
+  const R = 0.9 + p * 0.55, sd = p * 11.3, f = (x, y, z) => Math.hypot(x, y / 0.65, z) / R - 1 + (vnoise3(x * 0.9 + sd, y * 0.9, z * 0.9) - 0.5) * 0.7;
+  const list = rockList.filter((_, k) => k % 3 === p);
+  const vg = voxelize({ min: [-R * 1.4, -0.4, -R * 1.4], max: [R * 1.4, R, R * 1.4], s: 0.18, occ: (x, y, z) => y > -0.4 && f(x, y, z) < 0, col: (x, y, z, top) => rockColor(y, top ? 1 : 0, vnoise3(x * 1.3, y * 1.3, z * 1.3)) });
+  instance(vg, voxMat, list, rocks.vox, true);
+  const sg = new THREE.IcosahedronGeometry(1, 4), pp = sg.attributes.position; const v = new THREE.Vector3();
+  for (let i = 0; i < pp.count; i++) { v.fromBufferAttribute(pp, i); let lo = 0.2, hi = 2; for (let it = 0; it < 18; it++) { const m = (lo + hi) / 2, q = v.clone().multiplyScalar(m * R); q.y *= 0.65 * 1; if (f(q.x, q.y, q.z) < 0) lo = m; else hi = m; } const q = v.clone().multiplyScalar(lo * R); q.y = Math.max(q.y * 0.65, -0.4); pp.setXYZ(i, q.x, q.y, q.z); }
+  sg.computeVertexNormals(); const nn = sg.attributes.normal, cc = [];
+  for (let i = 0; i < pp.count; i++) cc.push(...rockColor(pp.getY(i), nn.getY(i), vnoise3(pp.getX(i) * 1.3, pp.getY(i) * 1.3, pp.getZ(i) * 1.3)));
+  sg.setAttribute('color', new THREE.Float32BufferAttribute(cc, 3)); sg.setAttribute('aSway', new THREE.Float32BufferAttribute(new Float32Array(pp.count), 1));
+  instance(sg, voxMat, list, rocks.smooth, false);
+}
+
+// ruines (voxels dans les 3 variantes)
+{
+  const pillars = [[-3, 2.5, 4.4], [3, 2.5, 4.4], [-3, -2.5, 2.6], [3, -2.5, 1.3]];
+  const solid = (x, y, z) => {
+    if (y < 0.4 && Math.abs(x) < 5.6 && Math.abs(z) < 4.6) return 1;
+    if (y < 0.8 && Math.abs(x) < 5 && Math.abs(z) < 4) return 1;
+    for (const [px, pz, h] of pillars) { if (y < h && Math.hypot(x - px, z - pz) < 0.45) return 1; if (h > 4 && y > h - 0.3 && y < h && Math.abs(x - px) < 0.6 && Math.abs(z - pz) < 0.6) return 1; }
+    if (y > 4.4 && y < 5 && Math.abs(x) < 3.7 && Math.abs(z - 2.5) < 0.5) { const carve = Math.abs(z - 2.5) > 0.38 && (Math.floor(x / 0.3) & 1) && y > 4.55 && y < 4.85; return carve ? 0 : 1; }
+    if (y < 2.6 && y > 0.8 && Math.abs(x) < 0.9 - (y - 0.8) * 0.3 && Math.abs(z + 2.8) < 0.9 - (y - 0.8) * 0.3) return 1;
+    if (y < 0.7 && ((Math.abs(x - 6.6) < 0.7 && Math.abs(z - 1) < 0.45) || (Math.abs(x + 6.2) < 0.5 && Math.abs(z + 2) < 0.8))) return 1;
+    return 0;
+  };
+  const g = voxelize({ min: [-7.2, -0.6, -5], max: [7.2, 5.2, 5], s: 0.16, occ: (x, y, z) => y > -0.6 && (y < 0 ? Math.abs(x) < 5.6 && Math.abs(z) < 4.6 : solid(x, y, z) && vnoise3(x * 1.4, y * 1.4, z * 1.4) < 0.74),
+    col: (x, y, z, top) => top && vnoise3(x * 0.8 + 5, y, z * 0.8) > 0.48 ? [0.24, 0.3, 0.09] : [mix(0.5, 0.6, vnoise3(x * 2, y * 2, z * 2)), 0.42, 0.32] });
+  const m = new THREE.Mesh(g, voxMat); m.position.set(RUIN.x, RUIN_Y - 0.05, RUIN.z); m.rotation.y = 0.25; m.castShadow = m.receiveShadow = true; scene.add(m);
+}
+
+// ---------- herbes ----------
+function bladeGeo() {
+  const P = [], N = [], I = [], segs = 4;
+  for (let i = 0; i <= segs; i++) { const t = i / segs, w = 0.5 * (1 - Math.pow(t, 1.6)) + 0.02; P.push(-w, t, 0, w, t, 0); N.push(0, 0, 1, 0, 0, 1); }
+  for (let i = 0; i < segs; i++) { const a = i * 2; I.push(a, a + 1, a + 3, a, a + 3, a + 2); }
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(P, 3)); g.setAttribute('normal', new THREE.Float32BufferAttribute(N, 3)); g.setIndex(I); return g;
+}
+function stalkGeo() { const g = new THREE.BoxGeometry(1, 1, 1, 1, 5, 1); g.translate(0, 0.5, 0); g.deleteAttribute('uv'); return g; }
+const GN = +(QS.get('g') || (MOBILE ? 45000 : 200000)), GP = MOBILE ? 52 : 82;
+const grassU = {
+  uHeight: { value: heightTex }, uTime: U.time, uCenter: { value: new THREE.Vector2() }, uWolf: { value: new THREE.Vector2() }, uP: { value: GP },
+  uVox: { value: 0 }, uVoxR: { value: 0 }, uStep: { value: 0 }, uW: { value: 0.075 },
+  uSunDir: { value: sunDir }, uSunCol: { value: new THREE.Color() }, uSkyCol: { value: new THREE.Color() }, uGrdCol: { value: new THREE.Color() }, uFogCol: { value: fogCol }, uFogD: { value: 0.0062 },
+};
+const grassMat = new THREE.ShaderMaterial({
+  uniforms: grassU, side: THREE.DoubleSide,
+  vertexShader: `${GLSL_H}
+  uniform float uTime,uP,uVox,uVoxR,uStep,uW; uniform vec2 uCenter,uWolf;
+  attribute vec2 aOff; attribute vec4 aRnd;
+  varying float vT; varying vec3 vN; varying vec3 vW; varying float vVar;
+  void main(){
+    vec2 base = uCenter - uP*.5 + mod(aOff - uCenter + uP*.5, uP);
+    bool vox = uVox>0. && abs(base.x)<uVoxR && abs(base.y)<uVoxR;
+    vec2 cp = vox ? (floor(base/uVox)+.5)*uVox : base;
+    vec2 hs = hsample(cp);
+    float gy = vox ? floor(hs.x/uVox+.5)*uVox : hs.x-.04;
+    float d = length(base-uCenter);
+    float H = mix(.45,1.2,aRnd.x)*(.5+.5*hs.y)*smoothstep(uP*.5, uP*.5-14., d);
+    if(aRnd.w > hs.y) H = 0.;
+    float ang = aRnd.y*6.2832, ca=cos(ang), sa=sin(ang);
+    float t = position.y; vT = t;
+    vec3 p = vec3(position.x*uW, t*H, position.z*uW);
+    p.xz = mat2(ca,-sa,sa,ca)*p.xz;
+    vec3 n = normal; if(uStep==0.) n = normalize(n + vec3(position.x*2.,0.,0.)); n.xz = mat2(ca,-sa,sa,ca)*n.xz;
+    vec2 wd = normalize(vec2(1.,.35));
+    float gust = sin(dot(base,wd)*.13 - uTime*1.5)*.5+.5; gust = gust*gust*.75 + .25*(sin(base.x*.9+uTime*2.3)*sin(base.y*.7+uTime*1.9)*.5+.5);
+    vec2 bend = wd*(.2+gust*.85) + vec2(ca,sa)*(aRnd.z-.5)*.7;
+    vec2 tw = base-uWolf; float dw = length(tw);
+    bend += tw/max(dw,1e-3)*smoothstep(1.7,.2,dw)*2.6;
+    vec2 off = bend*t*t*H*.5; float drop = length(off)*.55*t;
+    if(uStep>0.){ off = floor(off/uStep+.5)*uStep; drop = floor(drop/uStep+.5)*uStep; }
+    p.xz += off; p.y = max(p.y-drop, 0.);
+    vW = vec3(base.x,gy,base.y)+p; vN = n; vVar = aRnd.z;
+    gl_Position = projectionMatrix*viewMatrix*vec4(vW,1.);
+  }`,
+  fragmentShader: `
+  uniform vec3 uSunDir,uSunCol,uSkyCol,uGrdCol,uFogCol; uniform float uFogD;
+  varying float vT; varying vec3 vN; varying vec3 vW; varying float vVar;
+  void main(){
+    vec3 lo = mix(vec3(.07,.09,.025), vec3(.12,.14,.04), vVar);
+    vec3 hi = mix(vec3(.62,.52,.16), vec3(.36,.46,.12), vVar);
+    vec3 alb = mix(lo, hi, smoothstep(0.,1.,vT));
+    vec3 N = normalize(gl_FrontFacing ? vN : -vN); N = normalize(N + vec3(0.,.6,0.));
+    vec3 V = normalize(cameraPosition - vW);
+    float ndl = max(dot(N,uSunDir),0.);
+    float trans = pow(max(dot(-V,uSunDir),0.),4.)*vT*vT;
+    vec3 amb = mix(uGrdCol, uSkyCol, .35+.65*vT);
+    vec3 col = alb*(uSunCol*(ndl*.85 + trans*2.2) + amb)*.55*mix(.5,1.,vT);
+    float fd = length(vW-cameraPosition); col = mix(col, uFogCol, 1.-exp(-uFogD*uFogD*fd*fd));
+    gl_FragColor = vec4(col,1.);
+  }`,
+});
+function makeGrass(kind) {
+  const src = kind === 'stalk' ? stalkGeo() : bladeGeo(), g = new THREE.InstancedBufferGeometry();
+  g.index = src.index; g.setAttribute('position', src.attributes.position); g.setAttribute('normal', src.attributes.normal);
+  const r = rng(77), off = new Float32Array(GN * 2), rnd = new Float32Array(GN * 4);
+  for (let i = 0; i < GN; i++) { off[i * 2] = r() * GP; off[i * 2 + 1] = r() * GP; rnd.set([r(), r(), r(), r()], i * 4); }
+  g.setAttribute('aOff', new THREE.InstancedBufferAttribute(off, 2)); g.setAttribute('aRnd', new THREE.InstancedBufferAttribute(rnd, 4));
+  g.instanceCount = GN;
+  const m = new THREE.Mesh(g, grassMat); m.frustumCulled = false; scene.add(m); return m;
+}
+const grass = { blade: makeGrass('blade'), stalk: makeGrass('stalk') };
+
+// ---------- eau ----------
+const water = new THREE.Mesh(new THREE.CircleGeometry(POND.r + 2.8, 64).rotateX(-Math.PI / 2), new THREE.ShaderMaterial({
+  uniforms: { uTime: U.time, uSunDir: { value: sunDir }, uSunCol: { value: sunCol }, uFogCol: { value: fogCol }, uSkyCol: { value: skyCol }, uFogD: { value: 0.0062 } },
+  vertexShader: `varying vec3 vW; void main(){ vW=(modelMatrix*vec4(position,1.)).xyz; gl_Position=projectionMatrix*viewMatrix*vec4(vW,1.); }`,
+  fragmentShader: `uniform float uTime,uFogD; uniform vec3 uSunDir,uSunCol,uFogCol,uSkyCol; varying vec3 vW;
+  void main(){
+    vec2 p=vW.xz; float t=uTime;
+    vec3 N=normalize(vec3(sin(p.x*1.7+t*1.1)*.04+sin(p.y*2.3-t*.9)*.03+sin((p.x+p.y)*4.1+t*2.)*.015, 1., cos(p.y*1.9+t*1.3)*.04+sin(p.x*3.1-t*1.7)*.02));
+    vec3 V=normalize(cameraPosition-vW); vec3 R=reflect(-V,N);
+    float fr=.02+.8*pow(1.-max(dot(N,V),0.),5.);
+    vec3 refl=mix(uFogCol*.55, uSkyCol*.35, pow(clamp(R.y,0.,1.),.5));
+    refl += uSunCol*pow(max(dot(R,uSunDir),0.),350.)*12.;
+    vec3 col=mix(vec3(.015,.04,.035), refl, fr);
+    float fd=length(vW-cameraPosition); col=mix(col,uFogCol,1.-exp(-uFogD*uFogD*fd*fd));
+    gl_FragColor=vec4(col,1.);
+  }`,
+}));
+water.position.set(POND.x, WATER_Y, POND.z); scene.add(water);
+
+// ---------- lucioles & poussière dorée ----------
+const FN = MOBILE ? 500 : 1400;
+const flies = (() => {
+  const g = new THREE.BufferGeometry(), r = rng(5), s = new Float32Array(FN * 4);
+  for (let i = 0; i < FN; i++) s.set([r() * 50, r() * 50, r(), r()], i * 4);
+  g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(FN * 3), 3)); g.setAttribute('aS', new THREE.BufferAttribute(s, 4));
+  const m = new THREE.Points(g, new THREE.ShaderMaterial({
+    uniforms: { uHeight: { value: heightTex }, uTime: U.time, uCenter: grassU.uCenter, uNight: { value: 0 }, uSunDir: { value: sunDir }, uSunCol: { value: sunCol }, uPR: { value: PR } },
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+    vertexShader: `${GLSL_H}
+    uniform float uTime,uNight,uPR; uniform vec2 uCenter; uniform vec3 uSunDir;
+    attribute vec4 aS; varying vec3 vC; varying float vA;
+    void main(){
+      vec2 b = uCenter-25.+mod(aS.xy-uCenter+25.,50.);
+      b += vec2(sin(uTime*.3+aS.z*40.),cos(uTime*.23+aS.w*30.))*1.5;
+      float fly = step(aS.w,.3);
+      float y = hsample(b).x + mix(.3+aS.z*2.4, .5+aS.z*7., 1.-fly) + sin(uTime*.8+aS.z*20.)*.3;
+      vec3 w = vec3(b.x,y,b.y);
+      vec4 mv = viewMatrix*vec4(w,1.);
+      vec3 V = normalize(w-cameraPosition);
+      float blink = pow(max(0.,sin(uTime*(1.+aS.z*2.)+aS.w*60.)),5.);
+      float beam = pow(max(dot(V,uSunDir),0.),6.);
+      vA = fly>.5 ? blink*uNight*1.6 : (.06+beam*.9)*(1.-uNight*.6);
+      vC = fly>.5 ? vec3(.75,1.,.3)*3. : vec3(1.,.8,.45)*1.4;
+      gl_PointSize = (fly>.5 ? 7. : 3.)*uPR*14./max(-mv.z,1.);
+      gl_Position = projectionMatrix*mv;
+    }`,
+    fragmentShader: `varying vec3 vC; varying float vA; void main(){ float d=length(gl_PointCoord-.5); float a=smoothstep(.5,0.,d); gl_FragColor=vec4(vC*a*a*vA,1.); }`,
+  }));
+  m.frustumCulled = false; scene.add(m); return m;
+})();
+
+// ---------- le loup ----------
+const FUR = { back: [0.24, 0.21, 0.18], side: [0.5, 0.46, 0.4], belly: [0.82, 0.76, 0.64], dark: [0.12, 0.1, 0.09] };
+const furCol = (part, y, x, z) => {
+  if (part === 'nose') return FUR.dark;
+  if (part === 'ear') return y > 0.06 ? FUR.dark : FUR.side;
+  if (part === 'snout') return y < -0.01 ? FUR.belly : FUR.side;
+  if (part === 'leg' || part === 'paw') return FUR.belly.map((c, k) => mix(c, FUR.side[k], 0.35));
+  if (part === 'tail') return y < -0.25 ? FUR.dark : mix(0, 1, 0) || FUR.side.map((c, k) => mix(c, FUR.back[k], 0.4));
+  const t = clamp((y + 0.1) / 0.3, 0, 1); const a = t < 0.5 ? FUR.belly : FUR.side, b = t < 0.5 ? FUR.side : FUR.back, u = t < 0.5 ? t * 2 : (t - 0.5) * 2; return a.map((c, k) => mix(c, b[k], u));
+};
+const wolfMatS = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.92 });
+const wolfParts = [];
+function ellPart(parent, part, c, r, rot = [0, 0, 0]) {
+  const o = { parent, part, c, r, rot, mesh: null }; wolfParts.push(o); return o;
+}
+function partGeo(o, vox) {
+  let g;
+  if (vox) {
+    const s = 0.042, cR = Math.cos(-o.rot[0]), sR = Math.sin(-o.rot[0]);
+    g = voxelize({ min: [o.c[0] - o.r[0] - 0.1, o.c[1] - Math.max(o.r[1], o.r[2]) - 0.1, o.c[2] - Math.max(o.r[1], o.r[2]) - 0.1], max: [o.c[0] + o.r[0] + 0.1, o.c[1] + Math.max(o.r[1], o.r[2]) + 0.1, o.c[2] + Math.max(o.r[1], o.r[2]) + 0.1], s,
+      occ: (x, y, z) => { let dy = y - o.c[1], dz = z - o.c[2]; const ry = dy * cR - dz * sR, rz = dy * sR + dz * cR; return (((x - o.c[0]) / o.r[0]) ** 2 + (ry / o.r[1]) ** 2 + (rz / o.r[2]) ** 2) < 1; },
+      col: (x, y, z) => furCol(o.part, y - (o.part === 'body' ? 0 : o.c[1]), x, z) });
+    g.deleteAttribute('aSway');
+  } else {
+    g = new THREE.SphereGeometry(1, 20, 14); g.scale(...o.r); g.rotateX(o.rot[0]); g.translate(...o.c);
+    const p = g.attributes.position, col = []; for (let i = 0; i < p.count; i++) col.push(...furCol(o.part, p.getY(i) - (o.part === 'body' ? 0 : o.c[1]), p.getX(i), p.getZ(i)));
+    g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  }
+  return g;
+}
+const wolf = new THREE.Group(), body = new THREE.Group(); wolf.add(body); scene.add(wolf);
+const W = { body, legs: [], head: new THREE.Group(), tail: new THREE.Group() };
+// proportions d'un loup gris : ~0,8 m au garrot, ~1,3 m de long hors queue
+ellPart(body, 'body', [0, 0.82, 0.28], [0.19, 0.25, 0.32]);
+ellPart(body, 'body', [0, 0.84, -0.05], [0.16, 0.2, 0.42]);
+ellPart(body, 'body', [0, 0.84, -0.4], [0.15, 0.18, 0.22]);
+ellPart(body, 'body', [0, 0.96, 0.52], [0.12, 0.15, 0.22], [-0.7, 0, 0]);
+W.head.position.set(0, 1.08, 0.66); body.add(W.head);
+ellPart(W.head, 'body', [0, 0, 0.02], [0.12, 0.11, 0.14]);
+ellPart(W.head, 'snout', [0, -0.04, 0.2], [0.06, 0.055, 0.13]);
+ellPart(W.head, 'nose', [0, -0.02, 0.33], [0.025, 0.022, 0.02]);
+ellPart(W.head, 'ear', [0.07, 0.12, -0.02], [0.035, 0.08, 0.025], [-0.2, 0, 0]);
+ellPart(W.head, 'ear', [-0.07, 0.12, -0.02], [0.035, 0.08, 0.025], [-0.2, 0, 0]);
+for (const [x, z, front] of [[0.1, 0.33, 1], [-0.1, 0.33, 1], [0.1, -0.42, 0], [-0.1, -0.42, 0]]) {
+  const up = new THREE.Group(), low = new THREE.Group(); up.position.set(x, 0.74, z); body.add(up);
+  const L1 = front ? 0.36 : 0.33, L2 = front ? 0.38 : 0.42; low.position.set(0, -L1, 0); up.add(low);
+  ellPart(up, front ? 'leg' : 'body', [0, -L1 / 2, 0], [0.055, L1 / 2 + 0.05, front ? 0.07 : 0.09]);
+  ellPart(low, 'leg', [0, -L2 / 2, 0], [0.035, L2 / 2 + 0.03, 0.04]);
+  ellPart(low, 'paw', [0, -L2 + 0.02, 0.04], [0.045, 0.03, 0.07]);
+  W.legs.push({ up, low, front, off: (x > 0) === !!front ? 0 : Math.PI, L: L1 + L2 });
+}
+W.tail.position.set(0, 0.9, -0.6); body.add(W.tail);
+ellPart(W.tail, 'tail', [0, -0.22, -0.08], [0.075, 0.26, 0.08], [0.35, 0, 0]);
+ellPart(W.tail, 'tail', [0, -0.42, -0.14], [0.065, 0.1, 0.065], [0.35, 0, 0]);
+const wolfGeoCache = {};
+function setWolfStyle(vox) {
+  wolfParts.forEach((o, k) => {
+    const key = (vox ? 'v' : 's') + k; const g = wolfGeoCache[key] ||= partGeo(o, vox);
+    if (!o.mesh) { o.mesh = new THREE.Mesh(g, vox ? voxMat : wolfMatS); o.mesh.castShadow = true; o.parent.add(o.mesh); }
+    o.mesh.geometry = g; o.mesh.material = vox ? voxMat : wolfMatS;
+  });
+}
+
+// ---------- post : rayons volumétriques + étalonnage ----------
+const rt = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: 0 });
+rt.depthTexture = new THREE.DepthTexture(1, 1);
+const postU = { tColor: { value: rt.texture }, tDepth: { value: rt.depthTexture }, uSun: { value: new THREE.Vector2() }, uSunVis: { value: 0 }, uRayCol: { value: rayCol }, uExposure: { value: 1.0 }, uAspect: { value: 1 }, uTime: U.time, uSteps: { value: MOBILE ? 24 : 56 }, uWarm: { value: 0 } };
+const post = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.ShaderMaterial({
+  uniforms: postU, depthTest: false, depthWrite: false,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position.xy,0.,1.); }`,
+  fragmentShader: `uniform sampler2D tColor,tDepth; uniform vec2 uSun; uniform float uSunVis,uExposure,uAspect,uTime,uWarm; uniform int uSteps; uniform vec3 uRayCol; varying vec2 vUv;
+  float msk(vec2 uv){ if(uv.x<0.||uv.y<0.||uv.x>1.||uv.y>1.) return 0.; float d=texture2D(tDepth,uv).x; float s = d>.99999?1.:0.; float r=length((uv-uSun)*vec2(uAspect,1.)); return s*(.25+exp(-r*5.)*1.5); }
+  vec3 aces(vec3 x){ const float a=2.51,b=.03,c=2.43,d=.59,e=.14; return clamp((x*(a*x+b))/(x*(c*x+d)+e),0.,1.); }
+  void main(){
+    vec3 col = texture2D(tColor,vUv).rgb;
+    if(uSunVis>0.){
+      vec2 dl=(vUv-uSun)/float(uSteps)*.92; vec2 c=vUv; float ill=1., acc=0.;
+      for(int i=0;i<64;i++){ if(i>=uSteps) break; c-=dl; acc+=msk(c)*ill; ill*=.962; }
+      acc/=float(uSteps);
+      float near = exp(-length((vUv-uSun)*vec2(uAspect,1.))*2.2);
+      col += uRayCol*acc*uSunVis*(.9+near*1.6);
+    }
+    col *= uExposure;
+    float l=dot(col,vec3(.2126,.7152,.0722)); col=mix(vec3(l),col,1.08); col*=mix(vec3(1.),vec3(1.05,.99,.9),uWarm);
+    col = aces(col);
+    col = pow(col, vec3(1./2.2));
+    vec2 q=vUv-.5; col*=1.-dot(q,q)*.55;
+    col += (fract(sin(dot(vUv*vec2(12.9898,78.233)+uTime,vec2(1.,1.)))*43758.5453)-.5)/255.;
+    gl_FragColor=vec4(col,1.);
+  }`,
+}));
+const postScene = new THREE.Scene(); postScene.add(post); const postCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+post.frustumCulled = false;
+
+function resize() {
+  renderer.setPixelRatio(PR); renderer.setSize(innerWidth, innerHeight);
+  const w = Math.floor(innerWidth * PR), h = Math.floor(innerHeight * PR); rt.setSize(w, h);
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); postU.uAspect.value = camera.aspect;
+  flies.material.uniforms.uPR.value = PR * (innerHeight / 900);
+}
+addEventListener('resize', resize);
+
+// ---------- son (WebAudio, tout synthétisé) ----------
+let AC = null, audio = null, muted = false;
+function startAudio() {
+  if (AC) return; AC = new (window.AudioContext || window.webkitAudioContext)();
+  const master = AC.createGain(); master.gain.value = 0.55; master.connect(AC.destination);
+  const nb = AC.createBuffer(1, AC.sampleRate * 4, AC.sampleRate), nd = nb.getChannelData(0); let b = 0;
+  for (let i = 0; i < nd.length; i++) { b = 0.985 * b + 0.15 * (Math.random() * 2 - 1); nd[i] = b; }
+  const noise = () => { const s = AC.createBufferSource(); s.buffer = nb; s.loop = true; s.start(0, Math.random() * 3); return s; };
+  const wind = noise(), wf = AC.createBiquadFilter(); wf.type = 'lowpass'; wf.frequency.value = 500; const wg = AC.createGain(); wg.gain.value = 0.3; wind.connect(wf).connect(wg).connect(master);
+  const leaves = noise(), lf = AC.createBiquadFilter(); lf.type = 'bandpass'; lf.frequency.value = 2600; lf.Q.value = 0.8; const lg = AC.createGain(); lg.gain.value = 0.05; leaves.connect(lf).connect(lg).connect(master);
+  // grillons : un buffer de stridulation, plusieurs voix spatialisées
+  const cb = AC.createBuffer(1, AC.sampleRate * 1.6, AC.sampleRate), cd = cb.getChannelData(0);
+  for (let i = 0; i < cd.length; i++) { const t = i / AC.sampleRate, chirp = t % 0.4 < 0.16, pulse = Math.sin(t * 2 * Math.PI * 30) > 0; cd[i] = chirp && pulse ? Math.sin(t * 2 * Math.PI * 4300) * 0.5 * Math.sin(Math.PI * (t % 0.4) / 0.16) : 0; }
+  const crick = AC.createGain(); crick.gain.value = 0; crick.connect(master);
+  for (let k = 0; k < 5; k++) { const s = AC.createBufferSource(); s.buffer = cb; s.loop = true; s.playbackRate.value = 0.9 + Math.random() * 0.2; const p = AC.createStereoPanner(); p.pan.value = Math.random() * 2 - 1; const g = AC.createGain(); g.gain.value = 0.04 + Math.random() * 0.05; s.connect(g).connect(p).connect(crick); s.start(AC.currentTime + Math.random() * 1.6); }
+  // insectes de jungle (cigales) : bruit filtré, modulé
+  const cic = noise(), cf = AC.createBiquadFilter(); cf.type = 'bandpass'; cf.frequency.value = 6200; cf.Q.value = 9; const cg = AC.createGain(); cg.gain.value = 0; cic.connect(cf).connect(cg).connect(master);
+  const lfo = AC.createOscillator(); lfo.frequency.value = 9; const lfoG = AC.createGain(); lfoG.gain.value = 0.5; lfo.connect(lfoG); const am = AC.createGain(); am.gain.value = 0.5; lfoG.connect(am.gain); cg.disconnect(); cg.connect(am).connect(master); lfo.start();
+  audio = { master, wf, wg, lg, crick, cg, nextBird: AC.currentTime + 3 };
+}
+function bird() {
+  const o = AC.createOscillator(), g = AC.createGain(), p = AC.createStereoPanner(), t = AC.currentTime, f = 2200 + Math.random() * 1600;
+  p.pan.value = Math.random() * 1.6 - 0.8; o.connect(g).connect(p).connect(audio.master); g.gain.value = 0;
+  for (let k = 0; k < 3 + (Math.random() * 3 | 0); k++) { const s = t + k * 0.16; o.frequency.setValueAtTime(f, s); o.frequency.exponentialRampToValueAtTime(f * 1.5, s + 0.08); g.gain.setValueAtTime(0, s); g.gain.linearRampToValueAtTime(0.035, s + 0.02); g.gain.linearRampToValueAtTime(0, s + 0.11); }
+  o.start(t); o.stop(t + 1.2);
+}
+function updateAudio(gust) {
+  if (!audio) return; const t = AC.currentTime;
+  audio.master.gain.setTargetAtTime(muted ? 0 : 0.55, t, 0.2);
+  audio.wf.frequency.setTargetAtTime(350 + gust * 700, t, 0.4); audio.wg.gain.setTargetAtTime(0.16 + gust * 0.3, t, 0.4); audio.lg.gain.setTargetAtTime(0.02 + gust * 0.07, t, 0.4);
+  audio.crick.gain.setTargetAtTime(0.25 + night * 0.9, t, 1); audio.cg.gain.setTargetAtTime(0.04 * (1 - night * 0.5) * clamp((-wolf.position.z - 40) / 60, 0.2, 1), t, 1);
+  if (t > audio.nextBird) { if (night < 0.6) bird(); audio.nextBird = t + 4 + Math.random() * 9; }
+}
+
+// ---------- entrées ----------
+const keys = {}; let camYaw = 0, camPitch = 0.38, camDist = 16, uiOn = true;
+addEventListener('keydown', (e) => {
+  keys[e.code] = true;
+  if (e.code === 'Digit1' || e.code === 'Numpad1') setVariant('A'); if (e.code === 'Digit2' || e.code === 'Numpad2') setVariant('B'); if (e.code === 'Digit3' || e.code === 'Numpad3') setVariant('C');
+  if (e.code === 'KeyM') muted = !muted;
+  if (e.code === 'KeyH') { uiOn = !uiOn; ['ui', 'help'].forEach(i => document.getElementById(i).classList.toggle('hidden', !uiOn)); }
+});
+addEventListener('keyup', (e) => { keys[e.code] = false; });
+const cv = renderer.domElement; let drag = null; const joy = { id: null, x0: 0, y0: 0, x: 0, y: 0 }, joyEl = document.getElementById('joy');
+cv.addEventListener('pointerdown', (e) => {
+  if (e.pointerType === 'touch' && e.clientX < innerWidth * 0.45 && joy.id === null) { joy.id = e.pointerId; joy.x0 = e.clientX; joy.y0 = e.clientY; joy.x = joy.y = 0; Object.assign(joyEl.style, { display: 'block', left: e.clientX - 55 + 'px', top: e.clientY - 55 + 'px' }); }
+  else drag = { id: e.pointerId, x: e.clientX, y: e.clientY };
+  cv.setPointerCapture(e.pointerId);
+});
+cv.addEventListener('pointermove', (e) => {
+  if (e.pointerId === joy.id) { joy.x = clamp((e.clientX - joy.x0) / 50, -1, 1); joy.y = clamp((e.clientY - joy.y0) / 50, -1, 1); return; }
+  if (drag && e.pointerId === drag.id) { camYaw -= (e.clientX - drag.x) * 0.005; camPitch = clamp(camPitch + (e.clientY - drag.y) * 0.004, 0.08, 1.15); drag.x = e.clientX; drag.y = e.clientY; }
+});
+const up = (e) => { if (e.pointerId === joy.id) { joy.id = null; joy.x = joy.y = 0; joyEl.style.display = 'none'; } if (drag && e.pointerId === drag.id) drag = null; };
+cv.addEventListener('pointerup', up); cv.addEventListener('pointercancel', up);
+cv.addEventListener('wheel', (e) => { camDist = clamp(camDist * (1 + Math.sign(e.deltaY) * 0.08), 6, 45); e.preventDefault(); }, { passive: false });
+const todEl = document.getElementById('tod'); todEl.value = tod; todEl.addEventListener('input', () => { tod = +todEl.value; updateSun(); });
+document.querySelectorAll('#ui button').forEach(b => b.addEventListener('click', () => setVariant(b.dataset.v)));
+const enter = document.getElementById('enter');
+if (SHOT) enter.classList.add('hidden');
+enter.addEventListener('pointerdown', () => { enter.classList.add('hidden'); try { startAudio(); } catch (e) { console.warn(e); } });
+
+// ---------- variantes ----------
+function setVariant(v) {
+  V = v; const c = VARIANTS[v];
+  if (c.vox) { const key = c.vox + ':' + c.R; voxTerrains[key] ||= buildVoxTerrain(c.vox, c.R); }
+  for (const [k, m] of Object.entries(voxTerrains)) m.visible = k === c.vox + ':' + c.R;
+  terrainSmooth.material.userData.hole.value = c.vox ? c.R - 0.01 : 0;
+  grass.blade.visible = c.grass === 'blade'; grass.stalk.visible = c.grass === 'stalk';
+  grassU.uVox.value = c.vox; grassU.uVoxR.value = c.R; grassU.uStep.value = c.grass === 'stalk' ? 0.05 : 0; grassU.uW.value = c.grass === 'stalk' ? 0.05 : 0.075;
+  groups.vox.visible = c.trees === 'vox'; groups.card.visible = c.trees === 'card';
+  rocks.vox.visible = c.rocks === 'vox'; rocks.smooth.visible = c.rocks === 'smooth';
+  setWolfStyle(c.wolf === 'vox');
+  postU.uWarm.value = v === 'A' ? 0.6 : 0.3;
+  document.querySelectorAll('#ui button').forEach(b => b.classList.toggle('on', b.dataset.v === v));
+  document.getElementById('desc').textContent = c.desc;
+  updateSun();
+}
+
+// ---------- boucle ----------
+const clock = new THREE.Clock(); let phase = 0, speed = 0, yaw = 0, wy = null, fpsAcc = 0, fpsN = 0, fps = 60, slowT = 0, frames = 0;
+wolf.position.set(0, 0, 0);
+const camTarget = new THREE.Vector3(), camPos = new THREE.Vector3(), tmp = new THREE.Vector3();
+function step(dt) {
+  U.time.value += dt; frames++;
+  if (keys.KeyT) { tod = clamp(tod + dt * 0.06, 0, 1); todEl.value = tod; updateSun(); }
+  if (keys.KeyR) { tod = clamp(tod - dt * 0.06, 0, 1); todEl.value = tod; updateSun(); }
+  // déplacement relatif à la caméra
+  let ix = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.KeyQ || keys.ArrowLeft ? 1 : 0) + joy.x;
+  let iz = (keys.KeyW || keys.KeyZ || keys.ArrowUp ? 1 : 0) - (keys.KeyS || keys.ArrowDown ? 1 : 0) - joy.y;
+  const il = Math.hypot(ix, iz), run = keys.ShiftLeft || keys.ShiftRight || Math.hypot(joy.x, joy.y) > 0.9;
+  const target = il > 0.05 ? (run ? 8.5 : 3.2) * Math.min(il, 1) : 0;
+  speed = mix(speed, target, 1 - Math.exp(-dt * 4));
+  if (il > 0.05) {
+    const fx = -Math.sin(camYaw), fz = -Math.cos(camYaw), rx = Math.cos(camYaw), rz = -Math.sin(camYaw);
+    const dx = fx * iz + rx * ix, dz = fz * iz + rz * ix, want = Math.atan2(dx, dz);
+    let d = want - yaw; d = Math.atan2(Math.sin(d), Math.cos(d)); yaw += d * (1 - Math.exp(-dt * 7));
+  }
+  wolf.position.x = clamp(wolf.position.x + Math.sin(yaw) * speed * dt, -185, 185);
+  wolf.position.z = clamp(wolf.position.z + Math.cos(yaw) * speed * dt, -185, 185);
+  const gy = Math.max(groundAt(wolf.position.x, wolf.position.z), WATER_Y - 0.55);
+  wy = wy === null ? gy : mix(wy, gy, 1 - Math.exp(-dt * 12)); wolf.position.y = wy; wolf.rotation.y = yaw;
+  // pente : on incline le corps
+  const ahead = groundAt(wolf.position.x + Math.sin(yaw) * 0.6, wolf.position.z + Math.cos(yaw) * 0.6), behind = groundAt(wolf.position.x - Math.sin(yaw) * 0.6, wolf.position.z - Math.cos(yaw) * 0.6);
+  body.rotation.x = mix(body.rotation.x, -Math.atan2(ahead - behind, 1.2) * 0.8, 1 - Math.exp(-dt * 6));
+  // allure : pas puis trot puis galop (approché par un trot ample)
+  const sp = speed / 8.5; phase += dt * (2.2 + speed * 1.15);
+  const amp = Math.min(0.62, speed * 0.16);
+  for (const L of W.legs) {
+    const ph = phase + L.off + (speed > 6 && !L.front ? 0.6 : 0), s = Math.sin(ph);
+    L.up.rotation.x = -s * amp + (L.front ? 0 : -0.25);
+    L.low.rotation.x = L.front ? Math.max(0, Math.cos(ph)) * amp * 1.5 : 0.45 + Math.max(0, Math.cos(ph)) * amp * 1.1;
+  }
+  body.position.y = Math.abs(Math.sin(phase)) * 0.035 * Math.min(1, speed / 2) + Math.sin(U.time.value * 1.8) * 0.004;
+  W.head.rotation.x = 0.12 + sp * 0.25 + Math.sin(phase * 2) * 0.03 * Math.min(1, speed / 2);
+  W.head.rotation.y = speed < 0.3 ? Math.sin(U.time.value * 0.35) * 0.4 : 0;
+  W.tail.rotation.x = 0.15 + sp * 0.7; W.tail.rotation.z = Math.sin(U.time.value * (1.5 + speed)) * 0.18;
+  // caméra haute et lointaine
+  camTarget.set(wolf.position.x, wolf.position.y + 1.2, wolf.position.z);
+  const cx = Math.sin(camYaw) * Math.cos(camPitch), cy = Math.sin(camPitch), cz = Math.cos(camYaw) * Math.cos(camPitch);
+  tmp.set(camTarget.x + cx * camDist, camTarget.y + cy * camDist, camTarget.z + cz * camDist);
+  tmp.y = Math.max(tmp.y, sampleH(tmp.x, tmp.z) + 1.5);
+  camPos.lerp(tmp, frames < 3 ? 1 : 1 - Math.exp(-dt * 5)); camera.position.copy(camPos);
+  camera.lookAt(wolf.position.x - Math.sin(camYaw) * 10, wolf.position.y + 2.5, wolf.position.z - Math.cos(camYaw) * 10);
+  // uniformes partagés
+  grassU.uWolf.value.set(wolf.position.x, wolf.position.z);
+  grassU.uCenter.value.set(wolf.position.x - Math.sin(camYaw) * 14, wolf.position.z - Math.cos(camYaw) * 14);
+  grassU.uSunCol.value.copy(sun.color).multiplyScalar(sun.intensity);
+  grassU.uSkyCol.value.copy(hemi.color).multiplyScalar(hemi.intensity); grassU.uGrdCol.value.copy(hemi.groundColor).multiplyScalar(hemi.intensity);
+  flies.material.uniforms.uNight.value = clamp(night * 1.2 + 0.08, 0, 1);
+  sun.position.copy(camTarget).addScaledVector(sunDir, 120); sun.target.position.copy(camTarget);
+  // soleil à l'écran pour les rayons
+  tmp.copy(camera.position).addScaledVector(sunDir, 1000).project(camera);
+  const behind2 = tmp.z > 1 || camera.getWorldDirection(new THREE.Vector3()).dot(sunDir) < 0;
+  postU.uSun.value.set(tmp.x * 0.5 + 0.5, tmp.y * 0.5 + 0.5);
+  const edge = Math.max(Math.abs(tmp.x), Math.abs(tmp.y));
+  postU.uSunVis.value = behind2 ? 0 : sstep(1.8, 0.9, edge) * sstep(-3, 1, elevDeg);
+  const gust = (Math.sin(U.time.value * 0.4) * 0.5 + 0.5) * (Math.sin(U.time.value * 1.3 + 1) * 0.3 + 0.7);
+  updateAudio(gust);
+}
+function render() {
+  if (QS.has('raw')) { renderer.setRenderTarget(null); renderer.render(scene, camera); return; }
+  renderer.setRenderTarget(rt); renderer.render(scene, camera);
+  renderer.setRenderTarget(null); renderer.render(postScene, postCam);
+}
+function loop() {
+  const dt = Math.min(clock.getDelta(), 0.05);
+  step(dt); render();
+  fpsAcc += dt; fpsN++;
+  if (fpsAcc > 0.5) {
+    fps = fpsN / fpsAcc; fpsAcc = 0; fpsN = 0;
+    if (!SHOT) { if (fps < 48) slowT++; else slowT = 0; if (slowT >= 4 && PR > 0.6) { PR = Math.max(0.6, PR - 0.15); resize(); slowT = 0; } }
+    const info = renderer.info.render;
+    document.getElementById('stats').textContent = `${fps.toFixed(0)} i/s · ${(info.triangles / 1e6).toFixed(1)} M tri · résolution ×${PR.toFixed(2)} · WebGL2${HAS_WEBGPU ? ' (WebGPU détecté, pas encore utilisé)' : ''}${MOBILE ? ' · mode léger' : ''}`;
+  }
+  if (SHOT && frames >= 3) return; // captures headless : on fige, puis __lupi.frame() rend à la demande
+  requestAnimationFrame(loop);
+}
+if (MOBILE) { postU.uSteps.value = 24; }
+resize(); setVariant(V); updateSun();
+window.__lupi = { setVariant, setTod: (t) => { tod = t; todEl.value = t; updateSun(); }, cam: (y, p, d) => { camYaw = y; camPitch = p; camDist = d; frames = 0; }, wolf, errs: window.__errs, frames: () => frames, ready: true,
+  walk: (on) => { keys.KeyW = on; }, frame: (n = 1) => { for (let i = 0; i < n; i++) step(1 / 30); render(); return frames; } };
+if (SHOT) PR = 1;
+loop();
+</script>
+</body>
+</html>
