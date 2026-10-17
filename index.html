@@ -47,7 +47,7 @@
 </div>
 <button id="mute" title="Couper le son (M)">🔊</button>
 <div id="help">
-  ZQSD / WASD / flèches : marcher · Maj : courir · Espace : sauter<br>
+  ZQSD / WASD / flèches : marcher · Maj (ou F, bascule) : courir · Espace : sauter<br>
   Souris (glisser) : tourner la caméra · molette : distance<br>
   0 : qualité auto · 1 à 4 : très bas → ultra · C : gros plan · T / R : avancer / reculer l'heure<br>
   M : son · H : masquer l'interface<br>
@@ -768,10 +768,10 @@ const flies = (() => {
       float blink = pow(max(0.,sin(uTime*(1.+aS.z*2.)+aS.w*60.)),5.);
       float beam = pow(max(dot(V,uSunDir),0.),6.);
       float dist = max(-mv.z,0.);
-      float fade = (1.-smoothstep(16.,24.,length(b-uCenter))) * smoothstep(2.,6.,dist); // ni pop au bord de la boîte, ni grain géant collé à la caméra
-      vA = (fly>.5 ? blink*uNight*1.6 : (.05+beam*.5)*(1.-uNight*.6)) * fade;
+      float fade = (1.-smoothstep(16.,24.,length(b-uCenter))) * smoothstep(6.,14.,dist); // ni pop au bord de la boîte, ni grain géant collé à la caméra
+      vA = (fly>.5 ? blink*uNight*1.6 : (.03+beam*.25)*(1.-uNight*.6)) * fade;
       vC = fly>.5 ? vec3(.75,1.,.3)*1.6 : vec3(1.,.8,.45)*.6; // sous le seuil du bloom : plus de confettis qui s'allument
-      gl_PointSize = clamp((fly>.5 ? 7. : 3.)*uPR*14./max(dist,1.), 2.5*uPR, 12.*uPR);
+      gl_PointSize = clamp((fly>.5 ? 7. : 2.)*uPR*14./max(dist,1.), 1.5*uPR, (fly>.5 ? 12. : 4.)*uPR);
       gl_Position = projectionMatrix*mv;
     }`,
     fragmentShader: `varying vec3 vC; varying float vA; void main(){ float d=length(gl_PointCoord-.5); float a=smoothstep(.5,0.,d); gl_FragColor=vec4(vC*a*a*vA,1.); }`,
@@ -908,7 +908,7 @@ const post = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.ShaderMater
     c = iM*c; c = clamp(log2(max(c,1e-10)), -12.47393, 4.026069); c = (c+12.47393)/16.500999;
     vec3 x2=c*c, x4=x2*x2; c = 15.5*x4*x2 - 40.14*x4*c + 31.96*x4 - 6.868*x2*c + .4298*x2 + .1191*c - .00232;
     c = oM*c; return clamp(c,0.,1.); }
-  vec3 bloomAt(vec2 uv){ vec3 b=vec3(0.); float w=0.; for(int i=2;i<7;i++){ float lv=float(i); vec3 s=min(textureLod(tColor,uv,lv).rgb,vec3(3.)); b+=max(s-vec3(1.),0.)*(1.+lv*.25); w+=1.; } return b/w; }
+  vec3 bloomAt(vec2 uv){ vec3 b=vec3(0.); float w=0.; for(int i=2;i<7;i++){ float lv=float(i); vec3 s=min(textureLod(tColor,uv,lv).rgb,vec3(2.2)); b+=max(s-vec3(1.5),0.)*(1.+lv*.25); w+=1.; } return b/w; }
   void main(){
     vec3 col = texture2D(tColor,vUv).rgb;
     if(uSunVis>0.){
@@ -976,17 +976,19 @@ function updateAudio(gust) {
 }
 
 // ---------- entrées ----------
-const keys = {}; let closeUp = false, camYaw = 0, camPitch = 0.38, camDist = 16, uiOn = true;
+const keys = {}; let sprintLock = false;
+const syncShift = (e) => { if (e.shiftKey === false) keys.ShiftLeft = keys.ShiftRight = false; else if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') keys[e.code] = true; }; let closeUp = false, camYaw = 0, camPitch = 0.38, camDist = 16, uiOn = true;
 addEventListener('keydown', (e) => {
   if (e.target instanceof HTMLInputElement) { e.preventDefault(); e.target.blur(); }
-  keys[e.code] = true;
+  keys[e.code] = true; syncShift(e);
+  if (e.code === 'KeyF' && !e.repeat) sprintLock = !sprintLock; // bascule : pour les claviers où Maj lâche (touches rémanentes Windows, fantômes)
   if (e.code === 'Space') { e.preventDefault(); if (!e.repeat) jumpReq = true; }
   const qd = { Digit0: -1, Digit1: 0, Digit2: 1, Digit3: 2, Digit4: 3, Numpad0: -1, Numpad1: 0, Numpad2: 1, Numpad3: 2, Numpad4: 3 }[e.code]; if (qd !== undefined) setQuality(qd);
   if (e.code === 'KeyC') { closeUp = !closeUp; camDist = closeUp ? 4.2 : 16; camPitch = closeUp ? 0.16 : 0.38; }
   if (e.code === 'KeyM') { muted = !muted; syncMute(); }
   if (e.code === 'KeyH') { uiOn = !uiOn; ['ui', 'help'].forEach(i => document.getElementById(i).classList.toggle('hidden', !uiOn)); }
 });
-addEventListener('keyup', (e) => { keys[e.code] = false; });
+addEventListener('keyup', (e) => { keys[e.code] = false; syncShift(e); });
 const releaseKeys = () => { for (const k in keys) keys[k] = false; }; // alt-tab en courant : le loup ne doit pas continuer seul
 addEventListener('blur', releaseKeys); document.addEventListener('visibilitychange', releaseKeys);
 const cv = renderer.domElement; let drag = null; const joy = { id: null, x0: 0, y0: 0, x: 0, y: 0 }, joyEl = document.getElementById('joy');
@@ -1083,7 +1085,7 @@ function step(dt) {
   // déplacement relatif à la caméra
   let ix = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.KeyQ || keys.ArrowLeft ? 1 : 0) + joy.x;
   let iz = (keys.KeyW || keys.KeyZ || keys.ArrowUp ? 1 : 0) - (keys.KeyS || keys.ArrowDown ? 1 : 0) - joy.y;
-  const il = Math.hypot(ix, iz), run = keys.ShiftLeft || keys.ShiftRight || Math.hypot(joy.x, joy.y) > 0.9;
+  const il = Math.hypot(ix, iz), run = keys.ShiftLeft || keys.ShiftRight || sprintLock || Math.hypot(joy.x, joy.y) > 0.9;
   const target = il > 0.05 ? (run ? 8.5 : 3.2) * Math.min(il, 1) : 0;
   speed = mix(speed, target, 1 - Math.exp(-dt * 4));
   if (il > 0.05) {
@@ -1095,13 +1097,14 @@ function step(dt) {
   wolf.position.x = clamp(ox + Math.sin(yaw) * speed * dt * (1 - 0.45 * wadeK), -185, 185);
   wolf.position.z = clamp(oz + Math.cos(yaw) * speed * dt * (1 - 0.45 * wadeK), -185, 185);
   { const hx = Math.sin(yaw), hz = Math.cos(yaw); // le loup fait ~1,5 m : on teste le museau, le centre et la croupe, pas seulement le centre
-    for (let it = 0; it < 2; it++) for (const c of COLL) for (const o of [0.8, 0, -0.7]) {
+    for (let it = 0; it < 4; it++) for (const c of COLL) for (const o of [0.8, 0, -0.7]) {
       const dx = wolf.position.x + hx * o - c[0], dz = wolf.position.z + hz * o - c[1], d = Math.hypot(dx, dz), m = c[2] + 0.3;
       if (d < m && d > 1e-4) { wolf.position.x += dx / d * (m - d); wolf.position.z += dz / d * (m - d); }
     } }
   // mare : il patauge dans les hauts-fonds (ralenti) mais ne va pas plus loin que le ventre ; l'eau n'est plus un sol
   const deep = (x, z) => WATER_Y - groundAt(x, z) > 0.45;
-  if (deep(wolf.position.x, wolf.position.z)) { const nx = wolf.position.x, nz = wolf.position.z; if (!deep(nx, oz)) wolf.position.z = oz; else if (!deep(ox, nz)) wolf.position.x = ox; else { wolf.position.x = ox; wolf.position.z = oz; } speed *= 0.5; }
+  // déjà dans l'eau profonde au départ : on laisse sortir, sinon le loup reste figé
+  if (!deep(ox, oz) && deep(wolf.position.x, wolf.position.z)) { const nx = wolf.position.x, nz = wolf.position.z; if (!deep(nx, oz)) wolf.position.z = oz; else if (!deep(ox, nz)) wolf.position.x = ox; else { wolf.position.x = ox; wolf.position.z = oz; } speed *= 0.5; }
   wadeK = clamp((WATER_Y - groundAt(wolf.position.x, wolf.position.z)) / 0.45, 0, 1);
   // verticale : suit le sol visible, tombe (gravité) quand le sol se dérobe de plus de 0,5 m, saute sur Espace
   const gy = groundAt(wolf.position.x, wolf.position.z);
