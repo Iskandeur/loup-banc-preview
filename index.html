@@ -20,6 +20,8 @@
   #enter span{opacity:.75;font-size:13px;margin-top:8px}
   .hidden{display:none!important}
   #mute{position:fixed;right:12px;top:12px;z-index:6;background:rgba(30,18,10,.45);color:#f6ead6;border:1px solid rgba(255,220,170,.35);border-radius:8px;font-size:18px;padding:3px 9px;cursor:pointer}
+  #jump{position:fixed;right:18px;bottom:96px;width:64px;height:64px;border-radius:50%;font-size:26px;display:none;z-index:4;background:rgba(30,18,10,.45);color:#f6ead6;border:2px solid rgba(255,230,190,.4);touch-action:none}
+  @media (pointer:coarse){#jump{display:block}}
   #joy{position:fixed;width:110px;height:110px;border-radius:50%;border:2px solid rgba(255,230,190,.35);display:none;pointer-events:none}
 </style>
 <script>
@@ -45,12 +47,13 @@
 </div>
 <button id="mute" title="Couper le son (M)">🔊</button>
 <div id="help">
-  ZQSD / WASD / flèches : marcher · Maj : courir<br>
+  ZQSD / WASD / flèches : marcher · Maj (ou F, bascule) : courir · Espace : sauter<br>
   Souris (glisser) : tourner la caméra · molette : distance<br>
   0 : qualité auto · 1 à 4 : très bas → ultra · C : gros plan · T / R : avancer / reculer l'heure<br>
   M : son · H : masquer l'interface<br>
-  Mobile : pouce gauche = marcher, droite = caméra
+  Mobile : pouce gauche = marcher, droite = caméra, bouton 🐾 = sauter
 </div>
+<button id="jump" title="Sauter (Espace)">🐾</button>
 <div id="enter"><b>Entrer dans la plaine</b><span>clic ou toucher (active le son)</span></div>
 <div id="joy"></div>
 <script type="module">
@@ -101,7 +104,7 @@ function density(x, z) {
   let d = 0.5 + 0.55 * fbm(x * 0.035 + 50, z * 0.035);
   const dp = Math.hypot(x - POND.x, z - POND.z); d *= sstep(POND.r + 0.3, POND.r + 2.5, dp);
   d *= mix(1, 0.25, sstep(-95, -115, z));
-  d *= mix(1, 0.15, sstep(11, 7, Math.hypot(x - RUIN.x, z - RUIN.z)));
+  d *= mix(1, 0.03, sstep(11, 7, Math.hypot(x - RUIN.x, z - RUIN.z)));  // plus de brins qui percent le dallage
   return clamp(d, 0, 1);
 }
 const HDATA = new Float32Array(TEXN * TEXN * 2);
@@ -131,11 +134,22 @@ const VARIANTS = {
 };
 let V = VARIANTS[(QS.get('v') || 'B').toUpperCase()] ? (QS.get('v') || 'B').toUpperCase() : 'B';
 const qv = (h, s) => Math.floor(h / s + 0.5) * s;
-function groundAt(x, z) {
+function terrainAt(x, z) {
   const c = VARIANTS[V]; const h = sampleH(x, z);
   if (c.vox && Math.abs(x) < c.R && Math.abs(z) < c.R) { const cx = (Math.floor(x / c.vox) + 0.5) * c.vox, cz = (Math.floor(z / c.vox) + 0.5) * c.vox; return qv(sampleH(cx, cz), c.vox); }
   return h;
 }
+// la ruine pose son niveau 0 sur le sol visible (voxel ou lisse) : le dallage ne peut plus être sous la terre
+const RUIN_ROT = 0.25;
+const ruinBase = () => terrainAt(RUIN.x, RUIN.z) - 0.05;
+function ruinTop(x, z) { // dessus du dallage (deux marches), repère local de la ruine ; -Infinity hors de son emprise
+  const dx = x - RUIN.x, dz = z - RUIN.z, c = Math.cos(RUIN_ROT), s = Math.sin(RUIN_ROT);
+  const lx = Math.abs(dx * c - dz * s), lz = Math.abs(dx * s + dz * c);
+  if (lx < 5 && lz < 4) return ruinBase() + 0.8;
+  if (lx < 5.6 && lz < 4.6) return ruinBase() + 0.4;
+  return -Infinity;
+}
+function groundAt(x, z) { return Math.max(terrainAt(x, z), ruinTop(x, z)); }
 
 // ---------- rendu ----------
 const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance', preserveDrawingBuffer: SHOT });
@@ -583,6 +597,7 @@ for (let p = 0; p < 3; p++) {
   const R = 0.9 + p * 0.55, sd = p * 11.3, f = (x, y, z) => Math.hypot(x, y / 0.65, z) / R - 1 + (vnoise3(x * 0.9 + sd, y * 0.9, z * 0.9) - 0.5) * 0.7;
   const list = rockList.filter((_, k) => k % 3 === p);
   const vg = voxelize({ min: [-R * 1.4, -0.4, -R * 1.4], max: [R * 1.4, R, R * 1.4], s: 0.18, occ: (x, y, z) => y > -0.4 && f(x, y, z) < 0, col: (x, y, z, top) => rockColor(y, top ? 1 : 0, vnoise3(x * 1.3, y * 1.3, z * 1.3)) });
+  for (const [x, z, r] of list) COLL.push([x, z, R * (0.85 + (r * 7 % 1) * 0.35) * 0.95]); // le loup contourne les rochers
   instance(vg, voxMat, list, rocks.vox, true);
   const sg = new THREE.IcosahedronGeometry(1, 4), pp = sg.attributes.position; const v = new THREE.Vector3();
   for (let i = 0; i < pp.count; i++) { v.fromBufferAttribute(pp, i); let lo = 0.2, hi = 2; for (let it = 0; it < 18; it++) { const m = (lo + hi) / 2, q = v.clone().multiplyScalar(m * R); q.y *= 0.65 * 1; if (f(q.x, q.y, q.z) < 0) lo = m; else hi = m; } const q = v.clone().multiplyScalar(lo * R); q.y = Math.max(q.y * 0.65, -0.4); pp.setXYZ(i, q.x, q.y, q.z); }
@@ -593,6 +608,7 @@ for (let p = 0; p < 3; p++) {
 }
 
 // ruines (voxels dans les 3 variantes)
+let ruinMesh = null;
 {
   const pillars = [[-3, 2.5, 4.4], [3, 2.5, 4.4], [-3, -2.5, 2.6], [3, -2.5, 1.3]];
   const solid = (x, y, z) => {
@@ -606,7 +622,12 @@ for (let p = 0; p < 3; p++) {
   };
   const g = voxelize({ min: [-7.2, -0.6, -5], max: [7.2, 5.2, 5], s: 0.16, occ: (x, y, z) => y > -0.6 && (y < 0 ? Math.abs(x) < 5.6 && Math.abs(z) < 4.6 : solid(x, y, z) && vnoise3(x * 1.4, y * 1.4, z * 1.4) < 0.74),
     col: (x, y, z, top) => top && vnoise3(x * 0.8 + 5, y, z * 0.8) > 0.48 ? [0.24, 0.3, 0.09] : [mix(0.5, 0.6, vnoise3(x * 2, y * 2, z * 2)), 0.42, 0.32] });
-  const m = new THREE.Mesh(g, voxMat); m.position.set(RUIN.x, RUIN_Y - 0.05, RUIN.z); m.rotation.y = 0.25; m.castShadow = m.receiveShadow = true; scene.add(m);
+  const m = new THREE.Mesh(g, voxMat); m.position.set(RUIN.x, ruinBase(), RUIN.z); m.rotation.y = RUIN_ROT; m.castShadow = m.receiveShadow = true; scene.add(m);
+  ruinMesh = m;
+  // piliers, bloc central et gravats : le loup les contourne au lieu de les traverser (COLL = [x, z, rayon du tronc] ; marge de 0,45 ajoutée au pas)
+  const rc = Math.cos(RUIN_ROT), rs = Math.sin(RUIN_ROT), W2 = (lx, lz) => [RUIN.x + lx * rc + lz * rs, RUIN.z - lx * rs + lz * rc];
+  for (const [px, pz] of pillars) COLL.push([...W2(px, pz), 0.5]);
+  COLL.push([...W2(0, -2.8), 0.95], [...W2(6.6, 1), 0.6], [...W2(-6.2, -2), 0.7]);
 }
 
 // ---------- herbes : trois anneaux de détail (brins → touffes → champ), même shader, fondus croisés ----------
@@ -746,9 +767,11 @@ const flies = (() => {
       vec3 V = normalize(w-cameraPosition);
       float blink = pow(max(0.,sin(uTime*(1.+aS.z*2.)+aS.w*60.)),5.);
       float beam = pow(max(dot(V,uSunDir),0.),6.);
-      vA = fly>.5 ? blink*uNight*1.6 : (.06+beam*.9)*(1.-uNight*.6);
-      vC = fly>.5 ? vec3(.75,1.,.3)*3. : vec3(1.,.8,.45)*1.4;
-      gl_PointSize = (fly>.5 ? 7. : 3.)*uPR*14./max(-mv.z,1.);
+      float dist = max(-mv.z,0.);
+      float fade = (1.-smoothstep(16.,24.,length(b-uCenter))) * smoothstep(6.,14.,dist); // ni pop au bord de la boîte, ni grain géant collé à la caméra
+      vA = (fly>.5 ? blink*uNight*1.6 : (.03+beam*.25)*(1.-uNight*.6)) * fade;
+      vC = fly>.5 ? vec3(.75,1.,.3)*1.6 : vec3(1.,.8,.45)*.6; // sous le seuil du bloom : plus de confettis qui s'allument
+      gl_PointSize = clamp((fly>.5 ? 7. : 2.)*uPR*14./max(dist,1.), 1.5*uPR, (fly>.5 ? 12. : 4.)*uPR);
       gl_Position = projectionMatrix*mv;
     }`,
     fragmentShader: `varying vec3 vC; varying float vA; void main(){ float d=length(gl_PointCoord-.5); float a=smoothstep(.5,0.,d); gl_FragColor=vec4(vC*a*a*vA,1.); }`,
@@ -885,7 +908,7 @@ const post = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.ShaderMater
     c = iM*c; c = clamp(log2(max(c,1e-10)), -12.47393, 4.026069); c = (c+12.47393)/16.500999;
     vec3 x2=c*c, x4=x2*x2; c = 15.5*x4*x2 - 40.14*x4*c + 31.96*x4 - 6.868*x2*c + .4298*x2 + .1191*c - .00232;
     c = oM*c; return clamp(c,0.,1.); }
-  vec3 bloomAt(vec2 uv){ vec3 b=vec3(0.); float w=0.; for(int i=2;i<7;i++){ float lv=float(i); vec3 s=textureLod(tColor,uv,lv).rgb; b+=max(s-vec3(.9),0.)*(1.+lv*.25); w+=1.; } return b/w; }
+  vec3 bloomAt(vec2 uv){ vec3 b=vec3(0.); float w=0.; for(int i=2;i<7;i++){ float lv=float(i); vec3 s=min(textureLod(tColor,uv,lv).rgb,vec3(2.2)); b+=max(s-vec3(1.5),0.)*(1.+lv*.25); w+=1.; } return b/w; }
   void main(){
     vec3 col = texture2D(tColor,vUv).rgb;
     if(uSunVis>0.){
@@ -953,16 +976,19 @@ function updateAudio(gust) {
 }
 
 // ---------- entrées ----------
-const keys = {}; let closeUp = false, camYaw = 0, camPitch = 0.38, camDist = 16, uiOn = true;
+const keys = {}; let sprintLock = false;
+const syncShift = (e) => { if (e.shiftKey === false) keys.ShiftLeft = keys.ShiftRight = false; else if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') keys[e.code] = true; }; let closeUp = false, camYaw = 0, camPitch = 0.38, camDist = 16, uiOn = true;
 addEventListener('keydown', (e) => {
   if (e.target instanceof HTMLInputElement) { e.preventDefault(); e.target.blur(); }
-  keys[e.code] = true;
+  keys[e.code] = true; syncShift(e);
+  if (e.code === 'KeyF' && !e.repeat) sprintLock = !sprintLock; // bascule : pour les claviers où Maj lâche (touches rémanentes Windows, fantômes)
+  if (e.code === 'Space') { e.preventDefault(); if (!e.repeat) jumpReq = true; }
   const qd = { Digit0: -1, Digit1: 0, Digit2: 1, Digit3: 2, Digit4: 3, Numpad0: -1, Numpad1: 0, Numpad2: 1, Numpad3: 2, Numpad4: 3 }[e.code]; if (qd !== undefined) setQuality(qd);
   if (e.code === 'KeyC') { closeUp = !closeUp; camDist = closeUp ? 4.2 : 16; camPitch = closeUp ? 0.16 : 0.38; }
   if (e.code === 'KeyM') { muted = !muted; syncMute(); }
   if (e.code === 'KeyH') { uiOn = !uiOn; ['ui', 'help'].forEach(i => document.getElementById(i).classList.toggle('hidden', !uiOn)); }
 });
-addEventListener('keyup', (e) => { keys[e.code] = false; });
+addEventListener('keyup', (e) => { keys[e.code] = false; syncShift(e); });
 const releaseKeys = () => { for (const k in keys) keys[k] = false; }; // alt-tab en courant : le loup ne doit pas continuer seul
 addEventListener('blur', releaseKeys); document.addEventListener('visibilitychange', releaseKeys);
 const cv = renderer.domElement; let drag = null; const joy = { id: null, x0: 0, y0: 0, x: 0, y: 0 }, joyEl = document.getElementById('joy');
@@ -978,6 +1004,7 @@ cv.addEventListener('pointermove', (e) => {
 const up = (e) => { if (e.pointerId === joy.id) { joy.id = null; joy.x = joy.y = 0; joyEl.style.display = 'none'; } if (drag && e.pointerId === drag.id) drag = null; };
 cv.addEventListener('pointerup', up); cv.addEventListener('pointercancel', up);
 cv.addEventListener('wheel', (e) => { camDist = clamp(camDist * (1 + Math.sign(e.deltaY) * 0.08), 3, 45); e.preventDefault(); }, { passive: false });
+document.getElementById('jump').addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); jumpReq = true; });
 const todEl = document.getElementById('tod'); todEl.value = tod; todEl.addEventListener('input', () => { tod = +todEl.value; updateSun(); });
 const enter = document.getElementById('enter');
 if (SHOT) enter.classList.add('hidden');
@@ -998,6 +1025,7 @@ function setVariant(v) {
   for (const [k, m] of Object.entries(voxTerrains)) m.visible = k === c.vox + ':' + c.R;
   terrainSmooth.material.userData.hole.value = c.vox ? c.R - 0.01 : 0;
   grassU.uVox.value = c.vox; grassU.uVoxR.value = c.R;
+  if (ruinMesh) ruinMesh.position.y = ruinBase();
   groups.vox.visible = c.trees === 'vox'; groups.card.visible = c.trees === 'card';
   rocks.vox.visible = c.rocks === 'vox'; rocks.smooth.visible = c.rocks === 'smooth';
   postU.uWarm.value = 0.6; postU.uExposure.value = 1.15;
@@ -1008,7 +1036,9 @@ function setVariant(v) {
 const QNAMES = ['très bas', 'bas', 'moyen', 'ultra'], PRCAP = [0.75, 1, 1.25, 1.5], PRMIN = [0.5, 0.6, 0.7, 0.75];
 const QV = QS.get('q');
 let AUTO = !SHOT && (QV === null || QV === 'auto');
-let QUAL = QV === 'low' ? 1 : (QV !== null && QV !== 'auto') ? clamp(+QV || 0, 0, 3) : (MOBILE ? 1 : 2);
+// carte intégrée (Radeon 780M, Intel UHD/Iris, Vega…) : on démarre un cran plus bas, l'auto remonte si ça tient
+const IGPU = /intel|uhd|iris|radeon(\(tm\))? (graphics|\d{3}m)|vega \d|adreno|mali|powervr/i.test(GPU);
+let QUAL = QV === 'low' ? 1 : (QV !== null && QV !== 'auto') ? clamp(+QV || 0, 0, 3) : (MOBILE || IGPU ? 1 : 2);
 const autoQ = { wait: 3, acc: [], ceil: 3 };
 function setQuality(q, fromAuto) {
   if (q < 0) { AUTO = true; autoQ.wait = 2; autoQ.acc = []; autoQ.ceil = 3; q = QUAL; } else if (!fromAuto) AUTO = false;
@@ -1021,6 +1051,9 @@ function setQuality(q, fromAuto) {
   renderer.shadowMap.enabled = q > 0 || !MOBILE;
   fernMeshes.forEach(m => { m.castShadow = q >= 2; });
   lodDirty = true; slowT = goodT = 0;
+  // anticrénelage MSAA sur la cible de rendu (le contour des brins d'herbe scintillait) : 2× dès « moyen », 4× en ultra, désactivable par ?aa=0
+  const aa = QS.get('aa') === '0' || MOBILE ? 0 : [0, 0, 2, 4][q];
+  if (rt.samples !== aa) { rt.samples = aa; rt.dispose(); }
   PR = SHOT ? 1 : Math.min(devicePixelRatio, PRCAP[q]); resize();
   document.querySelectorAll('#ui button[data-q]').forEach(b => b.classList.toggle('on', +b.dataset.q === q || (AUTO && b.dataset.q === '-1')));
 }
@@ -1042,7 +1075,7 @@ function adapt(f) {
 
 
 // ---------- boucle ----------
-const clock = new THREE.Clock(); let bodyPitch = 0, phase = 0, speed = 0, yaw = 0, wy = null, fpsAcc = 0, fpsN = 0, fps = 60, slowT = 0, frames = 0;
+const clock = new THREE.Clock(); let bodyPitch = 0, phase = 0, speed = 0, yaw = 0, wy = null, air = false, vy = 0, landK = 0, jumpReq = false, slopeS = 0, airK = 0, wadeK = 0, fpsAcc = 0, fpsN = 0, fps = 60, slowT = 0, frames = 0;
 wolf.position.set(0, 0, 0);
 const camTarget = new THREE.Vector3(), camPos = new THREE.Vector3(), tmp = new THREE.Vector3(), tmp2 = new THREE.Vector3(), tmp3 = new THREE.Vector3(), snap = new THREE.Vector3();
 function step(dt) {
@@ -1052,7 +1085,7 @@ function step(dt) {
   // déplacement relatif à la caméra
   let ix = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.KeyQ || keys.ArrowLeft ? 1 : 0) + joy.x;
   let iz = (keys.KeyW || keys.KeyZ || keys.ArrowUp ? 1 : 0) - (keys.KeyS || keys.ArrowDown ? 1 : 0) - joy.y;
-  const il = Math.hypot(ix, iz), run = keys.ShiftLeft || keys.ShiftRight || Math.hypot(joy.x, joy.y) > 0.9;
+  const il = Math.hypot(ix, iz), run = keys.ShiftLeft || keys.ShiftRight || sprintLock || Math.hypot(joy.x, joy.y) > 0.9;
   const target = il > 0.05 ? (run ? 8.5 : 3.2) * Math.min(il, 1) : 0;
   speed = mix(speed, target, 1 - Math.exp(-dt * 4));
   if (il > 0.05) {
@@ -1060,28 +1093,53 @@ function step(dt) {
     const dx = fx * iz + rx * ix, dz = fz * iz + rz * ix, want = Math.atan2(dx, dz);
     let d = want - yaw; d = Math.atan2(Math.sin(d), Math.cos(d)); yaw += d * (1 - Math.exp(-dt * 7));
   }
-  wolf.position.x = clamp(wolf.position.x + Math.sin(yaw) * speed * dt, -185, 185);
-  wolf.position.z = clamp(wolf.position.z + Math.cos(yaw) * speed * dt, -185, 185);
-  for (const c of COLL) { const dx = wolf.position.x - c[0], dz = wolf.position.z - c[1], d = Math.hypot(dx, dz), m = c[2] + 0.45; if (d < m && d > 1e-4) { wolf.position.x = c[0] + dx / d * m; wolf.position.z = c[1] + dz / d * m; } } // troncs
-  const gy = Math.max(groundAt(wolf.position.x, wolf.position.z), WATER_Y - 0.55);
-  wy = wy === null ? gy : mix(wy, gy, 1 - Math.exp(-dt * 12)); wolf.position.y = wy; wolf.rotation.y = yaw;
-  // pente : on incline le corps
-  const ahead = groundAt(wolf.position.x + Math.sin(yaw) * 0.6, wolf.position.z + Math.cos(yaw) * 0.6), behind = groundAt(wolf.position.x - Math.sin(yaw) * 0.6, wolf.position.z - Math.cos(yaw) * 0.6);
+  const ox = wolf.position.x, oz = wolf.position.z;
+  wolf.position.x = clamp(ox + Math.sin(yaw) * speed * dt * (1 - 0.45 * wadeK), -185, 185);
+  wolf.position.z = clamp(oz + Math.cos(yaw) * speed * dt * (1 - 0.45 * wadeK), -185, 185);
+  { const hx = Math.sin(yaw), hz = Math.cos(yaw); // le loup fait ~1,5 m : on teste le museau, le centre et la croupe, pas seulement le centre
+    for (let it = 0; it < 4; it++) for (const c of COLL) for (const o of [0.8, 0, -0.7]) {
+      const dx = wolf.position.x + hx * o - c[0], dz = wolf.position.z + hz * o - c[1], d = Math.hypot(dx, dz), m = c[2] + 0.3;
+      if (d < m && d > 1e-4) { wolf.position.x += dx / d * (m - d); wolf.position.z += dz / d * (m - d); }
+    } }
+  // mare : il patauge dans les hauts-fonds (ralenti) mais ne va pas plus loin que le ventre ; l'eau n'est plus un sol
+  const deep = (x, z) => WATER_Y - groundAt(x, z) > 0.45;
+  // déjà dans l'eau profonde au départ : on laisse sortir, sinon le loup reste figé
+  if (!deep(ox, oz) && deep(wolf.position.x, wolf.position.z)) { const nx = wolf.position.x, nz = wolf.position.z; if (!deep(nx, oz)) wolf.position.z = oz; else if (!deep(ox, nz)) wolf.position.x = ox; else { wolf.position.x = ox; wolf.position.z = oz; } speed *= 0.5; }
+  wadeK = clamp((WATER_Y - groundAt(wolf.position.x, wolf.position.z)) / 0.45, 0, 1);
+  // verticale : suit le sol visible, tombe (gravité) quand le sol se dérobe de plus de 0,5 m, saute sur Espace
+  const gy = groundAt(wolf.position.x, wolf.position.z);
+  if (wy === null) { wy = gy; air = false; vy = 0; }
+  if (jumpReq && !air) { air = true; vy = 6.3; landK = 0; }
+  jumpReq = false;
+  if (air) {
+    vy -= 17 * dt; wy += vy * dt;
+    if (wy <= gy && vy <= 0) { landK = clamp(-vy / 7, 0.15, 1); wy = gy; air = false; vy = 0; }
+  } else if (gy < wy - 0.5) { air = true; vy = 0; }
+  else wy = mix(wy, gy, 1 - Math.exp(-dt * 14));
+  landK = Math.max(0, landK - dt * 3.5);
+  wolf.position.y = wy; wolf.rotation.y = yaw;
+  // pente : on incline le corps sur la pente LISSE du relief (pas sur les marches des voxels, qui donnaient l'effet brouette), sur ~1,6 m
+  const ahead = sampleH(wolf.position.x + Math.sin(yaw) * 0.8, wolf.position.z + Math.cos(yaw) * 0.8), behind = sampleH(wolf.position.x - Math.sin(yaw) * 0.8, wolf.position.z - Math.cos(yaw) * 0.8);
+  slopeS = mix(slopeS, clamp(-Math.atan2(ahead - behind, 1.6), -0.7, 0.7), 1 - Math.exp(-dt * 7));
   // allure : pas → trot (paires diagonales) → galop (paires avant/arrière décalées)
   const sp = speed / 8.5, gal = sstep(5.2, 7.6, speed), mv = Math.min(1, speed / 1.5);
   phase += dt * (2.4 + speed * mix(1.05, 0.72, gal));
   const amp = Math.min(0.55, 0.12 + speed * 0.1) * mv;
+  airK = mix(airK, air ? 1 : 0, 1 - Math.exp(-dt * (air ? 18 : 12)));
   for (const L of W.legs) {
     const trotOff = (L.x > 0) === !!L.front ? 0 : Math.PI, galOff = (L.front ? 0 : Math.PI * 0.9) + (L.x > 0 ? 0.35 : 0);
     const ph = phase + mix(trotOff, galOff, gal), s = Math.sin(ph), lift = Math.max(0, Math.cos(ph));
-    L.up.rotation.x = -s * amp * (L.front ? 1 : 1.1) + (L.front ? 0.04 : -0.18);
-    L.low.rotation.x = L.front ? lift * amp * 1.9 : 0.32 + lift * amp * 1.4;
+    let ux = -s * amp * (L.front ? 1 : 1.1) + (L.front ? 0.04 : -0.18), lx = L.front ? lift * amp * 1.9 : 0.32 + lift * amp * 1.4;
+    // en l'air : pattes avant jetées vers l'avant, arrière tendues vers l'arrière ; à la réception : tout fléchit
+    ux = mix(ux, L.front ? -0.75 : 0.55, airK) + landK * (L.front ? 0.35 : -0.3); lx = mix(lx, L.front ? 0.35 : 0.75, airK) + landK * 0.5;
+    L.up.rotation.x = ux - bodyPitch * 0.75 * (1 - airK);  // les pattes restent à peu près verticales quand le corps s'incline sur une pente
+    L.low.rotation.x = lx;
   }
   const crouch = mv * (1 - gal) * 0.05;  // il se coule dans l'herbe au pas
-  body.position.y = Math.abs(Math.sin(phase)) * mix(0.03, 0.06, gal) * mv - crouch + Math.sin(U.time.value * 1.6) * 0.004 * (1 - mv);
+  body.position.y = (Math.abs(Math.sin(phase)) * mix(0.03, 0.06, gal) * mv - crouch + Math.sin(U.time.value * 1.6) * 0.004 * (1 - mv)) * (1 - airK) - landK * 0.12;
   body.rotation.z = Math.sin(phase) * 0.045 * mv * (1 - gal);  // épaules qui roulent
   body.rotation.y = Math.sin(phase) * 0.03 * mv;
-  bodyPitch = mix(bodyPitch, -Math.atan2(ahead - behind, 1.2) * 0.8 + Math.sin(phase * 2) * 0.05 * gal, 1 - Math.exp(-dt * 6)); body.rotation.x = bodyPitch;
+  bodyPitch = mix(bodyPitch, slopeS * (air ? 0.5 : 0.85) + (air ? clamp(-vy * 0.045, -0.35, 0.45) : 0) + Math.sin(phase * 2) * 0.05 * gal * (1 - airK), 1 - Math.exp(-dt * 8)); body.rotation.x = bodyPitch;
   W.neck.rotation.x = mix(-0.1, 0.22, mv * (1 - gal * 0.6)) + Math.sin(phase * 2) * 0.03 * mv;  // tête basse en marchant
   W.head.rotation.x = -0.12 * mv + 0.02;
   W.neck.rotation.y = speed < 0.3 ? Math.sin(U.time.value * 0.33) * 0.45 : 0;
@@ -1131,7 +1189,7 @@ function loop() {
     fps = fpsN / fpsAcc; fpsAcc = 0; fpsN = 0;
     if (!SHOT) adapt(fps);
     const info = renderer.info.render;
-    document.getElementById('stats').textContent = `${fps.toFixed(0)} i/s (${(1000 / fps).toFixed(1)} ms) · ${(info.triangles / 1e6).toFixed(1)} M tri · résolution ×${PR.toFixed(2)} · qualité ${AUTO ? 'auto → ' : ''}${QNAMES[QUAL]} · ${GPU}${MOBILE ? ' · mode léger' : ''}`;
+    document.getElementById('stats').textContent = `${fps.toFixed(0)} i/s (${(1000 / fps).toFixed(1)} ms) · ${(info.triangles / 1e6).toFixed(1)} M tri · résolution ×${PR.toFixed(2)} · qualité ${AUTO ? 'auto → ' : ''}${QNAMES[QUAL]} · ${GPU}${MOBILE ? ' · mode léger' : ''}${!AUTO && fps < 40 && QUAL > 0 ? ' · lent : touche 0 = qualité auto' : ''}`;
   }
   if (SHOT && frames >= 3) return; // captures headless : on fige, puis __lupi.frame() rend à la demande
   requestAnimationFrame(loop);
